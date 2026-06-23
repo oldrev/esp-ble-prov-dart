@@ -1,7 +1,13 @@
 name: esp_ble_prov_dart
 description: Dart/Flutter ESP BLE Wi-Fi provisioning client using universal_ble.
 version: 0.1.0
+
 repository: https://github.com/oldrev/esp-ble-prov-dart
+issue_tracker: https://github.com/oldrev/esp-ble-prov-dart/issues
+
+maintainers:
+  - Wei Li <oldrev@gmail.com>
+
 
 environment:
   sdk: ">=3.7.0 <4.0.0"
