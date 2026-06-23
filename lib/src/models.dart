@@ -85,12 +85,14 @@ class WiFiStatus {
     return WiFiStatus(
       state: status.staState,
       failReason: status.hasFailReason() ? status.failReason : null,
-      connected: status.hasConnected()
-          ? WiFiConnectedState.fromProto(status.connected)
-          : null,
-      attemptsRemaining: status.hasAttemptFailed()
-          ? status.attemptFailed.attemptsRemaining
-          : null,
+      connected:
+          status.hasConnected()
+              ? WiFiConnectedState.fromProto(status.connected)
+              : null,
+      attemptsRemaining:
+          status.hasAttemptFailed()
+              ? status.attemptFailed.attemptsRemaining
+              : null,
     );
   }
 }

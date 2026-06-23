@@ -13,7 +13,8 @@ class WebEspBleTransport implements EspBleTransport {
   final _scanController = StreamController<BleDevice>.broadcast();
   static final Map<String, web_ble.BluetoothDevice> _devices = {};
   static final Map<String, web_ble.BluetoothService> _services = {};
-  static final Map<String, web_ble.BluetoothCharacteristic> _characteristics = {};
+  static final Map<String, web_ble.BluetoothCharacteristic> _characteristics =
+      {};
 
   @override
   Stream<BleDevice> get scanStream => _scanController.stream;
@@ -31,29 +32,33 @@ class WebEspBleTransport implements EspBleTransport {
     PlatformConfig? platformConfig,
   }) async {
     final prefixes = scanFilter?.withNamePrefix ?? const <String>[];
-    final filters = prefixes.isEmpty
-        ? <web_ble.RequestFilterBuilder>[]
-        : prefixes
-              .map((prefix) => web_ble.RequestFilterBuilder(namePrefix: prefix))
-              .toList(growable: false);
+    final filters =
+        prefixes.isEmpty
+            ? <web_ble.RequestFilterBuilder>[]
+            : prefixes
+                .map(
+                  (prefix) => web_ble.RequestFilterBuilder(namePrefix: prefix),
+                )
+                .toList(growable: false);
     final optionalServices = <String>{
       serviceUuid,
       ...?platformConfig?.web?.optionalServices,
       ...?scanFilter?.withServices,
     }.toList(growable: false);
 
-    final options = filters.isEmpty
-        ? web_ble.RequestOptionsBuilder.acceptAllDevices(
-            optionalServices: optionalServices,
-            optionalManufacturerData:
-                platformConfig?.web?.optionalManufacturerData,
-          )
-        : web_ble.RequestOptionsBuilder(
-            filters,
-            optionalServices: optionalServices,
-            optionalManufacturerData:
-                platformConfig?.web?.optionalManufacturerData,
-          );
+    final options =
+        filters.isEmpty
+            ? web_ble.RequestOptionsBuilder.acceptAllDevices(
+              optionalServices: optionalServices,
+              optionalManufacturerData:
+                  platformConfig?.web?.optionalManufacturerData,
+            )
+            : web_ble.RequestOptionsBuilder(
+              filters,
+              optionalServices: optionalServices,
+              optionalManufacturerData:
+                  platformConfig?.web?.optionalManufacturerData,
+            );
 
     final device = await web_ble.FlutterWebBluetooth.instance.requestDevice(
       options,
@@ -69,6 +74,7 @@ class WebEspBleTransport implements EspBleTransport {
   Future<void> connect(String deviceId, {Duration? timeout}) async {
     final device = _requireDevice(deviceId);
     await device.connect(timeout: timeout ?? const Duration(seconds: 10));
+    // ignore: deprecated_member_use
     final gatt = device.nativeDevice.gatt;
     if (gatt == null || !gatt.connected) {
       throw StateError('Web Bluetooth GATT server is not connected.');
@@ -160,6 +166,7 @@ class WebEspBleTransport implements EspBleTransport {
     final cached = _services[deviceId];
     if (cached != null) return cached;
     final device = _requireDevice(deviceId);
+    // ignore: deprecated_member_use
     final gatt = device.nativeDevice.gatt;
     if (gatt == null || !gatt.connected) {
       throw StateError('Web Bluetooth GATT server is not connected.');

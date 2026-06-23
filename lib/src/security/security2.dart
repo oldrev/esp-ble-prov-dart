@@ -9,10 +9,11 @@ class Security2 extends Security {
   final String username;
   final String password;
 
-  Never _unsupported() => throw const ProvisionerError(
-    'Security2 is not implemented yet. Use Security0 for open provisioning '
-    'tests or implement SRP6a/AES-GCM before using Security2 devices.',
-  );
+  Never _unsupported() =>
+      throw const ProvisionerError(
+        'Security2 is not implemented yet. Use Security0 for open provisioning '
+        'tests or implement SRP6a/AES-GCM before using Security2 devices.',
+      );
 
   @override
   Future<Uint8List> setup0Request() async => _unsupported();

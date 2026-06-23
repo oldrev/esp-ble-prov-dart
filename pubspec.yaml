@@ -1,7 +1,7 @@
 name: esp_ble_prov_dart
 description: Dart/Flutter ESP BLE Wi-Fi provisioning client using universal_ble.
 version: 0.1.0
-publish_to: none
+repository: https://github.com/oldrev/esp-ble-prov-dart
 
 environment:
   sdk: ">=3.7.0 <4.0.0"
@@ -13,7 +13,7 @@ dependencies:
   flutter_web_bluetooth: ^1.1.0
   cryptography: ^2.9.0
   protobuf: ^6.0.0
-  universal_ble: 1.2.0
+  universal_ble: ^1.2.0
 
 dev_dependencies:
   flutter_test:

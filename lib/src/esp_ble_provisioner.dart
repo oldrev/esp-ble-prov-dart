@@ -1,6 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
-
 import 'package:flutter/foundation.dart';
 import 'package:universal_ble/universal_ble.dart';
 
@@ -84,9 +82,10 @@ class EspBleProvisioner {
         withNamePrefix: [deviceNamePrefix],
         withServices: serviceUuids ?? const [],
       ),
-      platformConfig: kIsWeb
-          ? PlatformConfig(web: WebOptions(optionalServices: [serviceUuid]))
-          : null,
+      platformConfig:
+          kIsWeb
+              ? PlatformConfig(web: WebOptions(optionalServices: [serviceUuid]))
+              : null,
     );
 
     try {
@@ -416,12 +415,14 @@ class EspBleProvisioner {
     for (final service in services) {
       final derived = deriveEspProvisioningEndpointUuids(service.uuid);
       final characteristics = service.characteristics.map((c) => c.uuid);
-      final hasRequired =
-          [provSessionEndpoint, provConfigEndpoint, provScanEndpoint].every(
-            (endpoint) => characteristics.any(
-              (uuid) => _sameUuid(uuid, derived[endpoint]!),
-            ),
-          );
+      final hasRequired = [
+        provSessionEndpoint,
+        provConfigEndpoint,
+        provScanEndpoint,
+      ].every(
+        (endpoint) =>
+            characteristics.any((uuid) => _sameUuid(uuid, derived[endpoint]!)),
+      );
       if (hasRequired) return service;
     }
     return null;
