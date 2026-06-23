@@ -1,0 +1,15 @@
+{
+    "dart.lineLength": 80,
+    "dart.previewFlutterUiGuides": true,
+    "dart.previewFlutterUiGuidesCustomTracking": true,
+    "dart.debugExternalPackageLibraries": false,
+    "dart.debugSdkLibraries": false,
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+        "source.fixAll": "explicit"
+    },
+    "files.exclude": {
+        "**/.dart_tool": true,
+        "**/build": true
+    }
+}

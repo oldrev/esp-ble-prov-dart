@@ -1,0 +1,101 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  android-web:
+    name: Analyze, Test, Android, Web
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Flutter version
+        run: flutter --version
+
+      - name: Install package dependencies
+        run: flutter pub get
+
+      - name: Install example dependencies
+        working-directory: example
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
+
+      - name: Build Android APK
+        working-directory: example
+        run: flutter build apk --debug
+
+      - name: Build Web
+        working-directory: example
+        run: flutter build web --release --no-wasm-dry-run
+
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp-ble-prov-example-android-debug-apk
+          path: example/build/app/outputs/flutter-apk/app-debug.apk
+
+      - name: Upload Web build
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp-ble-prov-example-web
+          path: example/build/web
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Enable Windows desktop
+        run: flutter config --enable-windows-desktop
+
+      - name: Install package dependencies
+        run: flutter pub get
+
+      - name: Install example dependencies
+        working-directory: example
+        run: flutter pub get
+
+      - name: Build Windows
+        working-directory: example
+        run: flutter build windows --release
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp-ble-prov-example-windows
+          path: example/build/windows/**/runner/Release
