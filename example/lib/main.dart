@@ -299,30 +299,22 @@ class _DevicePane extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: devicePrefix,
-                      decoration: const InputDecoration(
-                        labelText: 'Device prefix',
-                        border: OutlineInputBorder(),
-                        isDense: true,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: TextField(
-                      controller: pop,
-                      decoration: const InputDecoration(
-                        labelText: 'Security1 PoP',
-                        border: OutlineInputBorder(),
-                        isDense: true,
-                      ),
-                    ),
-                  ),
-                ],
+              TextField(
+                controller: devicePrefix,
+                decoration: const InputDecoration(
+                  labelText: 'Device prefix',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: pop,
+                decoration: const InputDecoration(
+                  labelText: 'Security1 PoP',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
               ),
               const SizedBox(height: 12),
               FilledButton.icon(

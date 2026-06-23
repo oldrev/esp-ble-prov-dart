@@ -11,9 +11,11 @@ Before running it, configure the target platform permissions required by
 - Linux: BlueZ access.
 - Web: run in Chrome or Edge with Web Bluetooth support.
 
-The app uses Espressif's default provisioning service UUID and derives the built-in
-endpoint characteristic UUIDs automatically. Custom endpoints can still be
-registered in code when your firmware exposes additional protocomm endpoints.
+The example uses ESP-IDF's current built-in BLE provisioning service UUID,
+1775244d-6b43-439b-877c-060f2d9bed07. The older 0000ffff-0000-1000-8000-00805f9b34fb
+service UUID is not supported by this example. Endpoint characteristic UUIDs are
+derived from the default service UUID automatically. Custom endpoints can still
+be registered in code when your firmware exposes additional protocomm endpoints.
 
 Run on Web:
 

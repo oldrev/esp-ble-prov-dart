@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:universal_ble/universal_ble.dart';
 
 import 'ble/esp_ble_transport.dart';
+import 'ble/web_esp_ble_transport.dart';
 import 'endpoint_uuids.dart';
 import 'models.dart';
 import 'prov/proto_commands.dart' as commands;
@@ -24,14 +26,18 @@ class EspBleProvisioner {
     this.deviceNamePrefix = 'PROV_',
     Security? security,
     Map<String, String> endpointUuids = const {},
-    EspBleTransport transport = const UniversalBleTransport(),
+    EspBleTransport? transport,
     this.requestAndroidFineLocation = false,
     this.mtu = 517,
     this.responseDelay = const Duration(milliseconds: 200),
     this.logPayloads = false,
     void Function(String message)? onLog,
   }) : security = security ?? const Security0(),
-       _transport = transport,
+       _transport =
+           transport ??
+           (kIsWeb
+               ? WebEspBleTransport(serviceUuid: serviceUuid)
+               : const UniversalBleTransport()),
        _onLog = onLog,
        _explicitEndpointNames = endpointUuids.keys.toSet(),
        _endpointUuids = {
@@ -78,6 +84,9 @@ class EspBleProvisioner {
         withNamePrefix: [deviceNamePrefix],
         withServices: serviceUuids ?? const [],
       ),
+      platformConfig: kIsWeb
+          ? PlatformConfig(web: WebOptions(optionalServices: [serviceUuid]))
+          : null,
     );
 
     try {
@@ -387,6 +396,10 @@ class EspBleProvisioner {
 
   Future<void> _requestMtu(String deviceId) async {
     if (mtu <= 0) return;
+    if (kIsWeb) {
+      _log('Skipping MTU request on Web platform.');
+      return;
+    }
     try {
       final negotiated = await _transport.requestMtu(
         deviceId,

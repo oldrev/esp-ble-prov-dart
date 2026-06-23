@@ -3,7 +3,7 @@ import 'package:universal_ble/universal_ble.dart';
 import 'esp_ble_provisioner.dart';
 
 const String defaultEspProvisioningServiceUuid =
-    '0000ffff-0000-1000-8000-00805f9b34fb';
+    '1775244d-6b43-439b-877c-060f2d9bed07';
 
 const Map<String, int> defaultEspProvisioningEndpointIds = {
   provCtrlEndpoint: 0xff4f,

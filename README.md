@@ -19,11 +19,13 @@ If this project saved you time, native binding headaches, or lines of code, cons
 
 Since it is written in pure Dart and uses `universal_ble`, this package works seamlessly across **all Flutter-supported platforms**:
 
-* 🍏 **iOS** / **macOS**
-* 🤖 **Android**
-* 🐧 **Linux**
-* 🪟 **Windows**
-* 🌐 **Web**
+* **iOS** / **macOS**
+* **Android**
+* **Linux**
+* **Windows**
+* **Web**
+
+![Screen-shots](.github/assets/screenshots.png)
 
 ## Features
 
@@ -147,3 +149,6 @@ final provisioner = EspBleProvisioner(
 This Flutter port is released under the **MIT License**. See [`LICENSE`](./LICENSE).
 
 Upstream JavaScript reference project [`esp-ble-prov`](https://github.com/nikas-belogolov/esp-ble-prov) is also MIT licensed.
+
+- Copyright © 2026 Nikas Belogolov
+- Copyright © 2026 Wei Li
