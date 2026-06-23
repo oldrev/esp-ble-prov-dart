@@ -2,9 +2,18 @@
 
 A **pure Dart** implementation of the Espressif network provisioning protocol for Flutter.
 
-Unlike official wrappers, this package is written from scratch in Dart and does not depend on Espressif's native SDKs (`EspressifProvisioning` for iOS or `esp-idf-provisioning` for Android). By leveraging [`universal_ble`](https://pub.dev/packages/universal_ble) for cross-platform BLE access, it provides a unified, lightweight, and truly multi-platform provisioning solution.
+This package is a Dart port of the open-source JavaScript implementation [`esp-ble-prov`](https://github.com/nikas-belogolov/esp-ble-prov). By rewriting the protocol logic entirely in Dart and leveraging [`universal_ble`](https://pub.dev/packages/universal_ble) for cross-platform BLE access, it eliminates any dependency on Espressif's official native SDKs.
 
-This package was developed independently out of love for the open-source hardware/IoT ecosystem. If this pure-Dart implementation saved you time, native binding headaches, or lines of code, consider buying me a coffee! Your support helps keep this and other IoT packages maintained.
+The result is a unified, lightweight, and truly multi-platform provisioning solution without the headache of managing native bindings or platform-specific builds.
+
+If this project saved you time, native binding headaches, or lines of code, consider buying me a coffee. Your support helps keep this project maintained, thank you!
+
+<p align="center">
+  <a href="https://ko-fi.com/oldrev">
+    <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Buy me a coffee" width="200">
+  </a>
+</p>
+
 
 ## Supported Platforms
 
