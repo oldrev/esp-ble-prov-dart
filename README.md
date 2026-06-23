@@ -1,4 +1,9 @@
 # esp_ble_prov_dart
+[![pub package](https://img.shields.io/pub/v/esp_ble_prov_dart.svg)](https://pub.dev/packages/esp_ble_prov_dart)
+[![pub points](https://img.shields.io/pub/points/esp_ble_prov_dart)](https://pub.dev/packages/esp_ble_prov_dart/score)
+[![likes](https://img.shields.io/pub/likes/esp_ble_prov_dart)](https://pub.dev/packages/esp_ble_prov_dart/score)
+[![popularity](https://img.shields.io/pub/popularity/esp_ble_prov_dart)](https://pub.dev/packages/esp_ble_prov_dart/score)
+[![platforms](https://img.shields.io/badge/platforms-android%20%7C%20ios%20%7C%20linux%20%7C%20macos%20%7C%20web%20%7C%20windows-blue)](https://pub.dev/packages/esp_ble_prov_dart)
 
 A **pure Dart** implementation of the Espressif network provisioning protocol for Flutter.
 
@@ -69,8 +74,7 @@ Add the package to your Flutter project:
 
 ```yaml
 dependencies:
-  esp_ble_prov_dart:
-    path: ../ble-prov-dart # Or git/pub reference once published
+  esp_ble_prov_dart: ^0.1.1
 
 ```
 
