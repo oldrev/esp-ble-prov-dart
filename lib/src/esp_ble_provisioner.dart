@@ -3,7 +3,8 @@ import 'package:flutter/foundation.dart';
 import 'package:universal_ble/universal_ble.dart';
 
 import 'ble/esp_ble_transport.dart';
-import 'ble/web_esp_ble_transport.dart';
+import 'ble/platform_transport.dart'
+    if (dart.library.js_interop) 'ble/platform_transport_web.dart';
 import 'endpoint_uuids.dart';
 import 'models.dart';
 import 'prov/proto_commands.dart' as commands;
@@ -31,11 +32,7 @@ class EspBleProvisioner {
     this.logPayloads = false,
     void Function(String message)? onLog,
   }) : security = security ?? const Security0(),
-       _transport =
-           transport ??
-           (kIsWeb
-               ? WebEspBleTransport(serviceUuid: serviceUuid)
-               : const UniversalBleTransport()),
+       _transport = transport ?? createPlatformTransport(serviceUuid),
        _onLog = onLog,
        _explicitEndpointNames = endpointUuids.keys.toSet(),
        _endpointUuids = {

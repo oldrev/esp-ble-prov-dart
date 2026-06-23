@@ -9,6 +9,15 @@ maintainers:
   - Wei Li <oldrev@gmail.com>
 
 
+platforms:
+  android:
+  ios:
+  linux:
+  macos:
+  web:
+  windows:
+
+
 environment:
   sdk: ">=3.7.0 <4.0.0"
   flutter: ">=3.3.0"
@@ -16,12 +25,12 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_web_bluetooth: ^1.1.0
   cryptography: ^2.9.0
   protobuf: ^6.0.0
   universal_ble: ^1.2.0
 
 dev_dependencies:
+  flutter_web_bluetooth: ^1.1.0
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
