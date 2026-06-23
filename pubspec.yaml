@@ -30,7 +30,6 @@ dependencies:
   universal_ble: ^1.2.0
 
 dev_dependencies:
-  flutter_web_bluetooth: ^1.1.0
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0

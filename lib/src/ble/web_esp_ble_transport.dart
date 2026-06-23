@@ -1,20 +1,60 @@
 import 'dart:async';
+import 'dart:js_interop';
 import 'dart:typed_data';
 
-import 'package:flutter_web_bluetooth/flutter_web_bluetooth.dart' as web_ble;
 import 'package:universal_ble/universal_ble.dart';
 
 import 'esp_ble_transport.dart';
+
+@JS('navigator.bluetooth')
+external _Bluetooth? get _bluetooth;
+
+extension type _Bluetooth(JSObject _) implements JSObject {
+  external JSPromise<_BluetoothDevice> requestDevice(JSObject options);
+}
+
+extension type _BluetoothDevice(JSObject _) implements JSObject {
+  external String get id;
+  external String? get name;
+  external _BluetoothRemoteGATTServer? get gatt;
+}
+
+extension type _BluetoothRemoteGATTServer(JSObject _) implements JSObject {
+  external bool get connected;
+  external JSPromise<_BluetoothRemoteGATTServer> connect();
+  external void disconnect();
+  external JSPromise<_BluetoothRemoteGATTService> getPrimaryService(
+    String serviceUuid,
+  );
+}
+
+extension type _BluetoothRemoteGATTService(JSObject _) implements JSObject {
+  external String get uuid;
+  external JSPromise<_BluetoothRemoteGATTCharacteristic> getCharacteristic(
+    String characteristicUuid,
+  );
+  external JSPromise<JSArray<_BluetoothRemoteGATTCharacteristic>>
+  getCharacteristics();
+}
+
+extension type _BluetoothRemoteGATTCharacteristic(JSObject _)
+    implements JSObject {
+  external String get uuid;
+  external JSPromise<JSDataView> readValue();
+  external JSPromise<JSAny?> writeValue(JSArrayBuffer value);
+  external JSPromise<JSAny?> writeValueWithResponse(JSArrayBuffer value);
+  external JSPromise<JSAny?> writeValueWithoutResponse(JSArrayBuffer value);
+}
 
 class WebEspBleTransport implements EspBleTransport {
   WebEspBleTransport({required this.serviceUuid});
 
   final String serviceUuid;
   final _scanController = StreamController<BleDevice>.broadcast();
-  static final Map<String, web_ble.BluetoothDevice> _devices = {};
-  static final Map<String, web_ble.BluetoothService> _services = {};
-  static final Map<String, web_ble.BluetoothCharacteristic> _characteristics =
-      {};
+  static final Map<String, _BluetoothDevice> _devices = {};
+  static final Map<String, _BluetoothRemoteGATTService> _services = {};
+  static final Map<String, _BluetoothRemoteGATTCharacteristic>
+  _characteristics = {};
 
   @override
   Stream<BleDevice> get scanStream => _scanController.stream;
@@ -31,38 +71,25 @@ class WebEspBleTransport implements EspBleTransport {
     ScanFilter? scanFilter,
     PlatformConfig? platformConfig,
   }) async {
-    final prefixes = scanFilter?.withNamePrefix ?? const <String>[];
-    final filters =
-        prefixes.isEmpty
-            ? <web_ble.RequestFilterBuilder>[]
-            : prefixes
-                .map(
-                  (prefix) => web_ble.RequestFilterBuilder(namePrefix: prefix),
-                )
-                .toList(growable: false);
+    final bluetooth = _bluetooth;
+    if (bluetooth == null) {
+      throw UniversalBleException(
+        code: UniversalBleErrorCode.notImplemented,
+        message: 'Web Bluetooth is not available in this browser',
+      );
+    }
+
     final optionalServices = <String>{
       serviceUuid,
       ...?platformConfig?.web?.optionalServices,
       ...?scanFilter?.withServices,
     }.toList(growable: false);
-
-    final options =
-        filters.isEmpty
-            ? web_ble.RequestOptionsBuilder.acceptAllDevices(
-              optionalServices: optionalServices,
-              optionalManufacturerData:
-                  platformConfig?.web?.optionalManufacturerData,
-            )
-            : web_ble.RequestOptionsBuilder(
-              filters,
-              optionalServices: optionalServices,
-              optionalManufacturerData:
-                  platformConfig?.web?.optionalManufacturerData,
-            );
-
-    final device = await web_ble.FlutterWebBluetooth.instance.requestDevice(
-      options,
+    final options = _requestOptions(
+      namePrefixes: scanFilter?.withNamePrefix ?? const <String>[],
+      optionalServices: optionalServices,
     );
+
+    final device = await bluetooth.requestDevice(options).toDart;
     _devices[device.id] = device;
     _scanController.add(BleDevice(deviceId: device.id, name: device.name));
   }
@@ -73,19 +100,23 @@ class WebEspBleTransport implements EspBleTransport {
   @override
   Future<void> connect(String deviceId, {Duration? timeout}) async {
     final device = _requireDevice(deviceId);
-    await device.connect(timeout: timeout ?? const Duration(seconds: 10));
-    // ignore: deprecated_member_use
-    final gatt = device.nativeDevice.gatt;
-    if (gatt == null || !gatt.connected) {
+    final gatt = device.gatt;
+    if (gatt == null) {
+      throw StateError('Web Bluetooth GATT server is not available.');
+    }
+    final server = await gatt.connect().toDart.timeout(
+      timeout ?? const Duration(seconds: 10),
+    );
+    if (!server.connected) {
       throw StateError('Web Bluetooth GATT server is not connected.');
     }
-    final nativeService = await gatt.getPrimaryService(serviceUuid);
-    _services[deviceId] = web_ble.BluetoothService(nativeService);
+    final service = await server.getPrimaryService(serviceUuid).toDart;
+    _services[deviceId] = service;
   }
 
   @override
   Future<void> disconnect(String deviceId, {Duration? timeout}) async {
-    _devices[deviceId]?.disconnect();
+    _devices[deviceId]?.gatt?.disconnect();
     _services.remove(deviceId);
     _characteristics.removeWhere((key, _) => key.startsWith('$deviceId|'));
   }
@@ -109,7 +140,9 @@ class WebEspBleTransport implements EspBleTransport {
   }) async {
     final service = await _getService(deviceId);
     final characteristics = <BleCharacteristic>[];
-    for (final characteristic in await service.getCharacteristics()) {
+    final webCharacteristics =
+        (await service.getCharacteristics().toDart).toDart;
+    for (final characteristic in webCharacteristics) {
       characteristics.add(
         BleCharacteristic(characteristic.uuid, const [], const []),
       );
@@ -129,10 +162,14 @@ class WebEspBleTransport implements EspBleTransport {
       serviceUuid,
       characteristicUuid,
     );
-    final data = await characteristic.readValue(
-      timeout: timeout ?? const Duration(seconds: 5),
+    final future = characteristic.readValue().toDart;
+    final data = await (timeout == null ? future : future.timeout(timeout));
+    final bytes = data.toDart;
+    return Uint8List.view(
+      bytes.buffer,
+      bytes.offsetInBytes,
+      bytes.lengthInBytes,
     );
-    return data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
   }
 
   @override
@@ -149,35 +186,38 @@ class WebEspBleTransport implements EspBleTransport {
       serviceUuid,
       characteristicUuid,
     );
-    if (withoutResponse) {
-      await characteristic.writeValueWithoutResponse(value);
-    } else {
-      await characteristic.writeValueWithResponse(value);
-    }
+    final buffer =
+        value.buffer
+            .asUint8List(value.offsetInBytes, value.lengthInBytes)
+            .buffer
+            .toJS;
+    final future =
+        withoutResponse
+            ? characteristic.writeValueWithoutResponse(buffer).toDart
+            : characteristic.writeValueWithResponse(buffer).toDart;
+    await (timeout == null ? future : future.timeout(timeout));
   }
 
-  web_ble.BluetoothDevice _requireDevice(String deviceId) {
+  _BluetoothDevice _requireDevice(String deviceId) {
     final device = _devices[deviceId];
     if (device == null) throw StateError('Device $deviceId not found.');
     return device;
   }
 
-  Future<web_ble.BluetoothService> _getService(String deviceId) async {
+  Future<_BluetoothRemoteGATTService> _getService(String deviceId) async {
     final cached = _services[deviceId];
     if (cached != null) return cached;
     final device = _requireDevice(deviceId);
-    // ignore: deprecated_member_use
-    final gatt = device.nativeDevice.gatt;
+    final gatt = device.gatt;
     if (gatt == null || !gatt.connected) {
       throw StateError('Web Bluetooth GATT server is not connected.');
     }
-    final nativeService = await gatt.getPrimaryService(serviceUuid);
-    final service = web_ble.BluetoothService(nativeService);
+    final service = await gatt.getPrimaryService(serviceUuid).toDart;
     _services[deviceId] = service;
     return service;
   }
 
-  Future<web_ble.BluetoothCharacteristic> _getCharacteristic(
+  Future<_BluetoothRemoteGATTCharacteristic> _getCharacteristic(
     String deviceId,
     String requestedServiceUuid,
     String characteristicUuid,
@@ -189,8 +229,40 @@ class WebEspBleTransport implements EspBleTransport {
     final cached = _characteristics[key];
     if (cached != null) return cached;
     final service = await _getService(deviceId);
-    final characteristic = await service.getCharacteristic(characteristicUuid);
+    final characteristic =
+        await service.getCharacteristic(characteristicUuid).toDart;
     _characteristics[key] = characteristic;
     return characteristic;
+  }
+
+  JSObject _requestOptions({
+    required List<String> namePrefixes,
+    required List<String> optionalServices,
+  }) {
+    final options = JSObject();
+    options.setProperty(
+      'optionalServices'.toJS,
+      optionalServices
+          .map((service) => service.toLowerCase().toJS)
+          .toList()
+          .toJS,
+    );
+
+    if (namePrefixes.isEmpty) {
+      options.setProperty('acceptAllDevices'.toJS, true.toJS);
+      return options;
+    }
+
+    final filters =
+        namePrefixes
+            .map((prefix) {
+              final filter = JSObject();
+              filter.setProperty('namePrefix'.toJS, prefix.toJS);
+              return filter;
+            })
+            .toList()
+            .toJS;
+    options.setProperty('filters'.toJS, filters);
+    return options;
   }
 }
