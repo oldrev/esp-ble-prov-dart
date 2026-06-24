@@ -17,7 +17,7 @@ const Map<String, int> defaultEspProvisioningEndpointIds = {
 };
 
 /// First 16-bit characteristic UUID fragment used by ESP-IDF custom endpoints.
-const int firstEspProvisioningCustomEndpointId = 0xff54;
+const int kFirstEspProvisioningCustomEndpointId = 0xff54;
 
 /// Derives all default ESP provisioning endpoint characteristic UUIDs from
 /// [serviceUuid].
@@ -72,12 +72,12 @@ int espProvisioningCustomEndpointShortUuid(int index) {
   if (index < 0) {
     throw RangeError.range(index, 0, null, 'index');
   }
-  final shortUuid = firstEspProvisioningCustomEndpointId + index;
+  final shortUuid = kFirstEspProvisioningCustomEndpointId + index;
   if (shortUuid > 0xffff) {
     throw RangeError.range(
       index,
       0,
-      0xffff - firstEspProvisioningCustomEndpointId,
+      0xffff - kFirstEspProvisioningCustomEndpointId,
       'index',
     );
   }
