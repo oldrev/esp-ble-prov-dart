@@ -13,15 +13,33 @@ import 'provisioner_error.dart';
 import 'security/security.dart';
 import 'security/security0.dart';
 
+/// Security handshake endpoint name used by ESP-IDF provisioning firmware.
 const String provSessionEndpoint = 'prov-session';
+
+/// Wi-Fi scan endpoint name used by ESP-IDF provisioning firmware.
 const String provScanEndpoint = 'prov-scan';
+
+/// Wi-Fi configuration endpoint name used by ESP-IDF provisioning firmware.
 const String provConfigEndpoint = 'prov-config';
+
+/// Control endpoint name used by ESP-IDF provisioning firmware.
 const String provCtrlEndpoint = 'prov-ctrl';
+
+/// Protocol version endpoint name used by ESP-IDF provisioning firmware.
 const String protoVerEndpoint = 'proto-ver';
 
+/// High-level client for ESP BLE Wi-Fi provisioning.
+///
+/// A typical flow is [scanDevices], [connect], [establishSession], optionally
+/// [scan] for nearby networks, then [sendCredentials].
 class EspBleProvisioner {
+  /// Creates a provisioning client.
+  ///
+  /// [security] defaults to [Security0]. Use [Security1] for ESP-IDF devices
+  /// configured with security version 1. [endpointUuids] can override derived
+  /// characteristic UUIDs for custom firmware.
   EspBleProvisioner({
-    this.serviceUuid = defaultEspProvisioningServiceUuid,
+    this.serviceUuid = kDefaultEspProvisioningServiceUuid,
     this.deviceNamePrefix = 'PROV_',
     Security? security,
     Map<String, String> endpointUuids = const {},
@@ -40,12 +58,27 @@ class EspBleProvisioner {
          ...endpointUuids,
        };
 
+  /// BLE service UUID advertised by the ESP provisioning service.
   final String serviceUuid;
+
+  /// Device-name prefix used while scanning for provisioning devices.
   final String deviceNamePrefix;
+
+  /// Security scheme used for session setup and endpoint payload encryption.
   final Security security;
+
+  /// Whether Android scans should request fine location permission.
   final bool requestAndroidFineLocation;
+
+  /// Preferred BLE MTU requested after connecting on non-web platforms.
+  ///
+  /// Set to `0` or a negative value to skip MTU negotiation.
   final int mtu;
+
+  /// Delay inserted between endpoint writes and the matching reads.
   final Duration responseDelay;
+
+  /// Whether encrypted and decrypted endpoint payload previews are logged.
   final bool logPayloads;
   final EspBleTransport _transport;
   final void Function(String message)? _onLog;
@@ -56,10 +89,19 @@ class EspBleProvisioner {
   EspBleDevice? _device;
   bool _connected = false;
 
+  /// Currently connected device, or `null` when disconnected.
   EspBleDevice? get device => _device;
+
+  /// Whether this provisioner currently has an active BLE connection.
   bool get isConnected => _connected && _device != null;
+
+  /// Current endpoint-to-characteristic UUID mapping.
   Map<String, String> get endpointUuids => Map.unmodifiable(_endpointUuids);
 
+  /// Scans for ESP provisioning devices matching [deviceNamePrefix].
+  ///
+  /// The scan runs for [duration] and returns de-duplicated devices by BLE id.
+  /// Pass [serviceUuids] to add platform scan filters.
   Future<List<EspBleDevice>> scanDevices({
     Duration duration = const Duration(seconds: 8),
     List<String>? serviceUuids,
@@ -95,6 +137,11 @@ class EspBleProvisioner {
     return devices.values.toList(growable: false);
   }
 
+  /// Connects to [device], or scans and connects to the first matching device.
+  ///
+  /// After the BLE connection is established this discovers the provisioning
+  /// service, derives endpoint UUIDs, and validates that required
+  /// characteristics exist.
   Future<EspBleDevice> connect({
     EspBleDevice? device,
     Duration scanDuration = const Duration(seconds: 8),
@@ -115,6 +162,7 @@ class EspBleProvisioner {
     }
   }
 
+  /// Disconnects from the current device and clears local connection state.
   Future<void> disconnect({Duration? timeout}) async {
     final deviceId = _device?.id;
     if (deviceId != null) {
@@ -128,6 +176,11 @@ class EspBleProvisioner {
     _clearConnectionState();
   }
 
+  /// Performs the security handshake on the prov-session endpoint.
+  ///
+  /// Call this after [connect] and before sending Wi-Fi scan or configuration
+  /// commands. Throws [ProvisionerError] when the device response cannot be
+  /// parsed or security verification fails.
   Future<void> establishSession() async {
     _ensureConnected();
 
@@ -164,6 +217,7 @@ class EspBleProvisioner {
     }
   }
 
+  /// Requests the device to reset provisioning state.
   Future<void> ctrlReset() async {
     await _exchange(
       provCtrlEndpoint,
@@ -173,6 +227,7 @@ class EspBleProvisioner {
     );
   }
 
+  /// Requests the device to enter re-provisioning mode.
   Future<void> ctrlReprov() async {
     await _exchange(
       provCtrlEndpoint,
@@ -182,6 +237,7 @@ class EspBleProvisioner {
     );
   }
 
+  /// Starts a Wi-Fi scan on the ESP device.
   Future<void> startScan([
     WiFiScanOptions options = const WiFiScanOptions(),
   ]) async {
@@ -193,6 +249,7 @@ class EspBleProvisioner {
     );
   }
 
+  /// Returns the number of Wi-Fi scan results currently available.
   Future<int> getScanStatus() async {
     return _exchange(
       provScanEndpoint,
@@ -202,6 +259,7 @@ class EspBleProvisioner {
     );
   }
 
+  /// Reads Wi-Fi scan results from [startIndex] up to [count] entries.
   Future<List<WiFiNetwork>> getScanResults({
     required int count,
     int startIndex = 0,
@@ -214,6 +272,9 @@ class EspBleProvisioner {
     );
   }
 
+  /// Runs a blocking Wi-Fi scan and returns available networks.
+  ///
+  /// Non-blocking scans are not implemented and throw [ProvisionerError].
   Future<List<WiFiNetwork>> scan([
     WiFiScanOptions options = const WiFiScanOptions(),
   ]) async {
@@ -235,6 +296,7 @@ class EspBleProvisioner {
     return const <WiFiNetwork>[];
   }
 
+  /// Reads the current Wi-Fi connection status from the device.
   Future<WiFiStatus> getWiFiStatus() async {
     return _exchange(
       provConfigEndpoint,
@@ -244,6 +306,7 @@ class EspBleProvisioner {
     );
   }
 
+  /// Sends Wi-Fi credentials to the device without applying them.
   Future<void> setWiFiConfig(WiFiConfig config) async {
     await _exchange(
       provConfigEndpoint,
@@ -253,6 +316,7 @@ class EspBleProvisioner {
     );
   }
 
+  /// Instructs the device to apply the last Wi-Fi configuration sent.
   Future<void> applyWiFiConfig() async {
     await _exchange(
       provConfigEndpoint,
@@ -262,6 +326,7 @@ class EspBleProvisioner {
     );
   }
 
+  /// Polls Wi-Fi status until connected, failed, or [timeout] elapses.
   Future<WiFiStatus> waitForWiFiStatus({
     Duration timeout = const Duration(seconds: 60),
     Duration pollInterval = const Duration(seconds: 1),
@@ -283,6 +348,7 @@ class EspBleProvisioner {
     );
   }
 
+  /// Sends [config], applies it, and waits for the device to connect.
   Future<WiFiStatus> sendCredentials(
     WiFiConfig config, {
     Duration timeout = const Duration(seconds: 60),
@@ -292,6 +358,10 @@ class EspBleProvisioner {
     return waitForWiFiStatus(timeout: timeout);
   }
 
+  /// Encrypts and writes raw [value] to a registered endpoint.
+  ///
+  /// Use this for application-defined protocomm endpoints after the security
+  /// session has been established.
   Future<void> writeValueToEndpoint(
     String endpointName,
     Uint8List value,
@@ -300,15 +370,20 @@ class EspBleProvisioner {
     await _writeEndpoint(endpointName, encrypted);
   }
 
+  /// Reads and decrypts a raw value from a registered endpoint.
   Future<Uint8List> readValueFromEndpoint(String endpointName) async {
     final value = await _readEndpoint(endpointName);
     return security.decrypt(value);
   }
 
+  /// Registers or overrides an endpoint characteristic UUID by name.
   void registerEndpoint(String endpointName, String characteristicUuid) {
     _endpointUuids[endpointName] = characteristicUuid;
   }
 
+  /// Registers an ESP-IDF custom endpoint by sequential [index].
+  ///
+  /// Index   maps to short UUID  xff54, index 1 to  xff55, and so on.
   void registerCustomEndpoint(String endpointName, {int index = 0}) {
     final serviceUuid = _resolvedServiceUuid ?? this.serviceUuid;
     registerEndpoint(

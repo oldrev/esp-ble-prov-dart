@@ -1,3 +1,7 @@
+/// Dart and Flutter client for Espressif BLE Wi-Fi provisioning.
+///
+/// Import this library to scan for ESP provisioning devices, establish a
+/// security session, scan nearby Wi-Fi networks, and send Wi-Fi credentials.
 library;
 
 export 'src/esp_ble_provisioner.dart';

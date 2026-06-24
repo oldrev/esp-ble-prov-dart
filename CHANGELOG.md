@@ -9,3 +9,7 @@
 ## 0.1.1
 
 - Updated package information.
+
+## 0.2.0
+
+- Rename constants.

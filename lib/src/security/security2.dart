@@ -3,10 +3,19 @@ import 'dart:typed_data';
 import '../provisioner_error.dart';
 import 'security.dart';
 
+/// ESP provisioning security scheme 2 placeholder.
+///
+/// Security2 requires SRP6a and AES-GCM support. This class exposes the
+/// expected constructor shape but throws [ProvisionerError] for all operations
+/// until the implementation is completed.
 class Security2 extends Security {
+  /// Creates a Security2 configuration placeholder.
   Security2({required this.password, this.username = 'wifiprov'});
 
+  /// SRP username configured on the ESP device.
   final String username;
+
+  /// SRP password configured on the ESP device.
   final String password;
 
   Never _unsupported() =>

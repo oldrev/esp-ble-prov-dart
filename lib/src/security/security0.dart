@@ -4,7 +4,12 @@ import '../proto/protos.dart' as pb;
 import '../provisioner_error.dart';
 import 'security.dart';
 
+/// ESP provisioning security scheme 0.
+///
+/// This scheme performs no encryption and should only be used with devices
+/// configured for open provisioning or for local tests.
 class Security0 extends Security {
+  /// Creates an unencrypted provisioning security scheme.
   const Security0();
 
   @override
