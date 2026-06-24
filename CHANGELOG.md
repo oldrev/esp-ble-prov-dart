@@ -5,3 +5,7 @@
 - Added Security0 and Security1 session support.
 - Added Wi-Fi scan, configuration, apply, and status polling APIs.
 - Added custom endpoint read/write helpers.
+
+## 0.1.1
+
+- Updated package information.

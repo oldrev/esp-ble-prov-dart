@@ -24,11 +24,10 @@ If this project saved you time, native binding headaches, or lines of code, cons
 
 Since it is written in pure Dart and uses `universal_ble`, this package works seamlessly across **all Flutter-supported platforms**:
 
-* **iOS** / **macOS**
-* **Android**
-* **Linux**
-* **Windows**
-* **Web**
+| Android |  iOS  | macOS |  Web  | Linux | Windows |
+| :-----: | :---: | :---: | :---: | :---: | :-----: |
+|✅|✅|✅|✅|✅|✅|
+
 
 ![Screen-shots](.github/assets/screenshots.png)
 
