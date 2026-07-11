@@ -16,6 +16,7 @@ class BleEndpoint {
 abstract class EspBleTransport {
   Stream<BleDevice> get scanStream;
 
+  Stream<bool> connectionStream(String deviceId);
   Future<void> requestPermissions({bool withAndroidFineLocation = false});
   Future<void> startScan({
     ScanFilter? scanFilter,
@@ -50,6 +51,11 @@ class UniversalBleTransport implements EspBleTransport {
 
   @override
   Stream<BleDevice> get scanStream => UniversalBle.scanStream;
+
+  @override
+  Stream<bool> connectionStream(String deviceId) {
+    return UniversalBle.connectionStream(deviceId);
+  }
 
   @override
   Future<void> requestPermissions({bool withAndroidFineLocation = false}) {

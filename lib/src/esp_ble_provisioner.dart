@@ -47,6 +47,8 @@ class EspBleProvisioner {
     this.requestAndroidFineLocation = false,
     this.mtu = 517,
     this.responseDelay = const Duration(milliseconds: 200),
+    this.responseTimeout = const Duration(seconds: 5),
+    this.readRetryInterval = const Duration(milliseconds: 100),
     this.logPayloads = false,
     void Function(String message)? onLog,
   }) : security = security ?? const Security0(),
@@ -78,6 +80,12 @@ class EspBleProvisioner {
   /// Delay inserted between endpoint writes and the matching reads.
   final Duration responseDelay;
 
+  /// Maximum time to wait for a non-empty endpoint response after a write.
+  final Duration responseTimeout;
+
+  /// Delay between response read attempts while waiting for the device.
+  final Duration readRetryInterval;
+
   /// Whether encrypted and decrypted endpoint payload previews are logged.
   final bool logPayloads;
   final EspBleTransport _transport;
@@ -85,6 +93,9 @@ class EspBleProvisioner {
   final Set<String> _explicitEndpointNames;
   final Map<String, String> _endpointUuids;
   String? _resolvedServiceUuid;
+  Set<String>? _discoveredCharacteristicUuids;
+  StreamSubscription<bool>? _connectionSubscription;
+  Future<void> _operationTail = Future<void>.value();
 
   EspBleDevice? _device;
   bool _connected = false;
@@ -153,6 +164,7 @@ class EspBleProvisioner {
       await _transport.connect(target.id, timeout: connectionTimeout);
       _device = target;
       _connected = true;
+      _listenForDisconnect(target.id);
       await _requestMtu(target.id);
       await _discoverProvisioningService();
       return target;
@@ -182,13 +194,16 @@ class EspBleProvisioner {
   /// commands. Throws [ProvisionerError] when the device response cannot be
   /// parsed or security verification fails.
   Future<void> establishSession() async {
+    await _runExclusive(_establishSession);
+  }
+
+  Future<void> _establishSession() async {
     _ensureConnected();
 
     final setup0 = await security.setup0Request();
     _log('Security setup0 request: ${setup0.length} bytes');
     await _writeEndpoint(provSessionEndpoint, setup0);
-    await Future<void>.delayed(responseDelay);
-    final setup0Response = await _readEndpoint(provSessionEndpoint);
+    final setup0Response = await _readEndpointResponse(provSessionEndpoint);
     _log('Security setup0 response: ${setup0Response.length} bytes');
     try {
       await security.setup0Response(setup0Response);
@@ -203,8 +218,7 @@ class EspBleProvisioner {
     if (setup1 != null) {
       _log('Security setup1 request: ${setup1.length} bytes');
       await _writeEndpoint(provSessionEndpoint, setup1);
-      await Future<void>.delayed(responseDelay);
-      final setup1Response = await _readEndpoint(provSessionEndpoint);
+      final setup1Response = await _readEndpointResponse(provSessionEndpoint);
       _log('Security setup1 response: ${setup1Response.length} bytes');
       try {
         await security.setup1Response(setup1Response);
@@ -251,6 +265,12 @@ class EspBleProvisioner {
 
   /// Returns the number of Wi-Fi scan results currently available.
   Future<int> getScanStatus() async {
+    final status = await getScanStatusDetails();
+    return status.resultCount;
+  }
+
+  /// Reads Wi-Fi scan progress from the ESP device.
+  Future<WiFiScanStatus> getScanStatusDetails() async {
     return _exchange(
       provScanEndpoint,
       commands.scanStatusRequest(),
@@ -285,15 +305,15 @@ class EspBleProvisioner {
     }
     await startScan(options);
     final deadline = DateTime.now().add(const Duration(seconds: 30));
-    var count = 0;
     while (DateTime.now().isBefore(deadline)) {
-      count = await getScanStatus();
-      if (count > 0) {
-        return getScanResults(count: count);
+      final status = await getScanStatusDetails();
+      if (status.scanFinished) {
+        if (status.resultCount == 0) return const <WiFiNetwork>[];
+        return getScanResults(count: status.resultCount);
       }
       await Future<void>.delayed(const Duration(milliseconds: 1000));
     }
-    return const <WiFiNetwork>[];
+    throw const ProvisionerError('Wi-Fi scan timed out after 30000ms.');
   }
 
   /// Reads the current Wi-Fi connection status from the device.
@@ -366,14 +386,18 @@ class EspBleProvisioner {
     String endpointName,
     Uint8List value,
   ) async {
-    final encrypted = await security.encrypt(value);
-    await _writeEndpoint(endpointName, encrypted);
+    await _runExclusive(() async {
+      final encrypted = await security.encrypt(value);
+      await _writeEndpoint(endpointName, encrypted);
+    });
   }
 
   /// Reads and decrypts a raw value from a registered endpoint.
   Future<Uint8List> readValueFromEndpoint(String endpointName) async {
-    final value = await _readEndpoint(endpointName);
-    return security.decrypt(value);
+    return _runExclusive(() async {
+      final value = await _readEndpoint(endpointName);
+      return security.decrypt(value);
+    });
   }
 
   /// Registers or overrides an endpoint characteristic UUID by name.
@@ -383,7 +407,7 @@ class EspBleProvisioner {
 
   /// Registers an ESP-IDF custom endpoint by sequential [index].
   ///
-  /// Index   maps to short UUID  xff54, index 1 to  xff55, and so on.
+  /// Index 0 maps to short UUID 0xff54, index 1 to 0xff55, and so on.
   void registerCustomEndpoint(String endpointName, {int index = 0}) {
     final serviceUuid = _resolvedServiceUuid ?? this.serviceUuid;
     registerEndpoint(
@@ -434,16 +458,11 @@ class EspBleProvisioner {
     }
     _log('Using provisioning service: ${service.uuid}');
 
-    final known = _endpointUuids.values.map(_normalizeUuid).toSet();
     final characteristics = service.characteristics.map((c) => c.uuid).toList();
+    _discoveredCharacteristicUuids =
+        characteristics.map(_normalizeUuid).toSet();
     _log('Provisioning characteristics: ${characteristics.join(', ')}');
-    for (final uuid in known) {
-      if (!characteristics.any((c) => _sameUuid(c, uuid))) {
-        throw ProvisionerError(
-          'Configured endpoint characteristic not found: $uuid.',
-        );
-      }
-    }
+    _validateDiscoveredEndpoints([provSessionEndpoint, provConfigEndpoint]);
   }
 
   Future<void> _cleanupFailedConnection(String deviceId) async {
@@ -487,11 +506,7 @@ class EspBleProvisioner {
     for (final service in services) {
       final derived = deriveEspProvisioningEndpointUuids(service.uuid);
       final characteristics = service.characteristics.map((c) => c.uuid);
-      final hasRequired = [
-        provSessionEndpoint,
-        provConfigEndpoint,
-        provScanEndpoint,
-      ].every(
+      final hasRequired = [provSessionEndpoint, provConfigEndpoint].every(
         (endpoint) =>
             characteristics.any((uuid) => _sameUuid(uuid, derived[endpoint]!)),
       );
@@ -507,8 +522,7 @@ class EspBleProvisioner {
     _ensureConnected();
     final encryptedRequest = await security.encrypt(plainRequest);
     await _writeEndpoint(endpointName, encryptedRequest);
-    await Future<void>.delayed(responseDelay);
-    final encryptedResponse = await _readEndpoint(endpointName);
+    final encryptedResponse = await _readEndpointResponse(endpointName);
     _logPayload(
       'Encrypted response $endpointName: '
       '${encryptedResponse.length} bytes ${_hexPreview(encryptedResponse)}',
@@ -534,8 +548,10 @@ class EspBleProvisioner {
     String operation,
     T Function(Uint8List response) parse,
   ) async {
-    final response = await _sendEncrypted(endpointName, plainRequest);
-    return _parseResponse(operation, response, () => parse(response));
+    return _runExclusive(() async {
+      final response = await _sendEncrypted(endpointName, plainRequest);
+      return _parseResponse(operation, response, () => parse(response));
+    });
   }
 
   T _parseResponse<T>(
@@ -564,16 +580,57 @@ class EspBleProvisioner {
       endpoint.serviceUuid,
       endpoint.characteristicUuid,
       value,
+      timeout: responseTimeout,
     );
   }
 
-  Future<Uint8List> _readEndpoint(String endpointName) {
+  Future<Uint8List> _readEndpoint(String endpointName, {Duration? timeout}) {
     final endpoint = _endpoint(endpointName);
     _log('Read $endpointName ${endpoint.characteristicUuid}');
     return _transport.read(
       _requireDeviceId(),
       endpoint.serviceUuid,
       endpoint.characteristicUuid,
+      timeout: timeout,
+    );
+  }
+
+  Future<Uint8List> _readEndpointResponse(String endpointName) async {
+    if (responseDelay > Duration.zero) {
+      await Future<void>.delayed(responseDelay);
+    }
+
+    final deadline = DateTime.now().add(responseTimeout);
+    Object? lastError;
+    while (true) {
+      final remaining = deadline.difference(DateTime.now());
+      if (remaining <= Duration.zero) break;
+
+      try {
+        final value = await _readEndpoint(
+          endpointName,
+          timeout: _shorterDuration(remaining, const Duration(seconds: 1)),
+        );
+        if (value.isNotEmpty) {
+          return value;
+        }
+        lastError = null;
+      } catch (error) {
+        lastError = error;
+      }
+
+      final delay = _shorterDuration(
+        readRetryInterval,
+        deadline.difference(DateTime.now()),
+      );
+      if (delay <= Duration.zero) break;
+      await Future<void>.delayed(delay);
+    }
+
+    final suffix = lastError == null ? '' : ' Last read error: $lastError.';
+    throw ProvisionerError(
+      'Timed out waiting for response from endpoint "$endpointName" after '
+      '${responseTimeout.inMilliseconds}ms.$suffix',
     );
   }
 
@@ -585,6 +642,7 @@ class EspBleProvisioner {
         'creating EspBleProvisioner or call registerEndpoint().',
       );
     }
+    _ensureDiscoveredEndpoint(endpointName, characteristicUuid);
     return BleEndpoint(
       serviceUuid: _resolvedServiceUuid ?? serviceUuid,
       characteristicUuid: characteristicUuid,
@@ -604,10 +662,66 @@ class EspBleProvisioner {
   void _ensureConnected() => _requireDeviceId();
 
   void _clearConnectionState() {
+    _connectionSubscription?.cancel();
+    _connectionSubscription = null;
     _connected = false;
     _device = null;
     _resolvedServiceUuid = null;
+    _discoveredCharacteristicUuids = null;
   }
+
+  void _listenForDisconnect(String deviceId) {
+    _connectionSubscription?.cancel();
+    _connectionSubscription = _transport
+        .connectionStream(deviceId)
+        .listen(
+          (isConnected) {
+            if (isConnected || _device?.id != deviceId) return;
+            _log('Device disconnected: $deviceId');
+            _clearConnectionState();
+          },
+          onError: (Object error) {
+            _log('Connection stream error for $deviceId: $error');
+          },
+        );
+  }
+
+  void _validateDiscoveredEndpoints(Iterable<String> endpointNames) {
+    for (final endpointName in endpointNames) {
+      final characteristicUuid = _endpointUuids[endpointName];
+      if (characteristicUuid == null || characteristicUuid.isEmpty) {
+        throw ProvisionerError('Required endpoint "$endpointName" is missing.');
+      }
+      _ensureDiscoveredEndpoint(endpointName, characteristicUuid);
+    }
+  }
+
+  void _ensureDiscoveredEndpoint(
+    String endpointName,
+    String characteristicUuid,
+  ) {
+    final discoveredCharacteristicUuids = _discoveredCharacteristicUuids;
+    if (discoveredCharacteristicUuids == null) return;
+    final normalized = _normalizeUuid(characteristicUuid);
+    if (discoveredCharacteristicUuids.contains(normalized)) return;
+    throw ProvisionerError(
+      'Endpoint "$endpointName" characteristic not found: $characteristicUuid.',
+    );
+  }
+
+  Future<T> _runExclusive<T>(Future<T> Function() action) {
+    final completer = Completer<T>();
+    _operationTail = _operationTail.catchError((_) {}).then((_) async {
+      try {
+        completer.complete(await action());
+      } catch (error, stackTrace) {
+        completer.completeError(error, stackTrace);
+      }
+    });
+    return completer.future;
+  }
+
+  Duration _shorterDuration(Duration a, Duration b) => a <= b ? a : b;
 
   bool _sameUuid(String a, String b) => _normalizeUuid(a) == _normalizeUuid(b);
 

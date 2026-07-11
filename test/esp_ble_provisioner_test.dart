@@ -183,24 +183,37 @@ void main() {
     expect(second.cipherText, [0xed, 0xe2, 0xe2, 0xd5, 0xee]);
   });
 
-  test('throws when an overridden endpoint UUID is not found', () async {
-    final transport = _FakeTransport(
-      serviceUuid: serviceUuid,
-      endpoints: endpoints,
-    );
-    final provisioner = EspBleProvisioner(
-      serviceUuid: serviceUuid,
-      endpointUuids: {provScanEndpoint: '0000aaaa-0000-1000-8000-00805f9b34fb'},
-      transport: transport,
-    );
+  test(
+    'throws when an overridden endpoint UUID is used but not found',
+    () async {
+      final transport = _FakeTransport(
+        serviceUuid: serviceUuid,
+        endpoints: endpoints,
+      );
+      final provisioner = EspBleProvisioner(
+        serviceUuid: serviceUuid,
+        endpointUuids: {
+          provScanEndpoint: '0000aaaa-0000-1000-8000-00805f9b34fb',
+        },
+        transport: transport,
+      );
 
-    expect(
-      () => provisioner.connect(
+      await provisioner.connect(
         device: const EspBleDevice(id: 'device-1', name: 'BOPROV_TEST'),
-      ),
-      throwsA(isA<ProvisionerError>()),
-    );
-  });
+      );
+
+      await expectLater(
+        provisioner.startScan(),
+        throwsA(
+          isA<ProvisionerError>().having(
+            (error) => error.message,
+            'message',
+            contains('prov-scan'),
+          ),
+        ),
+      );
+    },
+  );
 
   test('detects proto-ver JSON on encrypted endpoint reads', () async {
     final transport = _FakeTransport(
@@ -248,6 +261,70 @@ void main() {
 
     expect(provisioner.isConnected, isFalse);
     expect(transport.disconnects, 1);
+  });
+
+  test('clears connection state when transport reports disconnect', () async {
+    final transport = _FakeTransport(
+      serviceUuid: serviceUuid,
+      endpoints: endpoints,
+    );
+    final provisioner = _provisioner(transport, serviceUuid, endpoints);
+
+    await provisioner.connect(
+      device: const EspBleDevice(id: 'device-1', name: 'BOPROV_TEST'),
+    );
+    expect(provisioner.isConnected, isTrue);
+
+    transport.emitConnection('device-1', false);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(provisioner.isConnected, isFalse);
+  });
+
+  test('waits for Wi-Fi scan to finish before reading results', () async {
+    final transport = _FakeTransport(
+      serviceUuid: serviceUuid,
+      endpoints: endpoints,
+      delayedScanFinish: true,
+    );
+    final provisioner = _provisioner(transport, serviceUuid, endpoints);
+
+    await provisioner.connect(
+      device: const EspBleDevice(id: 'device-1', name: 'BOPROV_TEST'),
+    );
+
+    final networks = await provisioner.scan();
+
+    expect(networks, hasLength(1));
+    expect(transport.scanStatusReads, 2);
+    expect(transport.scanResultReads, 1);
+  });
+
+  test('rejects invalid Wi-Fi config before writing credentials', () async {
+    final transport = _FakeTransport(
+      serviceUuid: serviceUuid,
+      endpoints: endpoints,
+    );
+    final provisioner = _provisioner(transport, serviceUuid, endpoints);
+
+    await provisioner.connect(
+      device: const EspBleDevice(id: 'device-1', name: 'BOPROV_TEST'),
+    );
+
+    await expectLater(
+      provisioner.setWiFiConfig(
+        WiFiConfig(ssid: List.filled(33, 'x').join(), passphrase: 'secret'),
+      ),
+      throwsA(
+        isA<ProvisionerError>().having(
+          (error) => error.message,
+          'message',
+          contains('SSID'),
+        ),
+      ),
+    );
+
+    expect(transport.decodedConfigWrites, isEmpty);
   });
 
   test('supports custom endpoint registration after connect', () async {
@@ -331,23 +408,39 @@ class _FakeTransport implements EspBleTransport {
     required this.endpoints,
     String? discoveredServiceUuid,
     this.protoVersionResponseOnScan = false,
+    this.delayedScanFinish = false,
   }) : discoveredServiceUuid = discoveredServiceUuid ?? serviceUuid;
 
   final String serviceUuid;
   final String discoveredServiceUuid;
   final Map<String, String> endpoints;
   final bool protoVersionResponseOnScan;
+  final bool delayedScanFinish;
   final _scanController = StreamController<BleDevice>.broadcast();
+  final Map<String, StreamController<bool>> _connectionControllers = {};
   final List<_WriteRecord> writes = [];
   final List<pb.WiFiConfigPayload> decodedConfigWrites = [];
   int disconnects = 0;
   int? requestedMtu;
+  int scanStatusReads = 0;
+  int scanResultReads = 0;
 
   Uint8List _nextRead = Uint8List(0);
   bool _connected = false;
 
   @override
   Stream<BleDevice> get scanStream => _scanController.stream;
+
+  @override
+  Stream<bool> connectionStream(String deviceId) {
+    return _connectionControllers
+        .putIfAbsent(deviceId, () => StreamController<bool>.broadcast())
+        .stream;
+  }
+
+  void emitConnection(String deviceId, bool isConnected) {
+    _connectionControllers[deviceId]?.add(isConnected);
+  }
 
   @override
   Future<void> requestPermissions({
@@ -368,12 +461,14 @@ class _FakeTransport implements EspBleTransport {
   @override
   Future<void> connect(String deviceId, {Duration? timeout}) async {
     _connected = true;
+    emitConnection(deviceId, true);
   }
 
   @override
   Future<void> disconnect(String deviceId, {Duration? timeout}) async {
     disconnects++;
     _connected = false;
+    emitConnection(deviceId, false);
   }
 
   @override
@@ -460,17 +555,19 @@ class _FakeTransport implements EspBleTransport {
             ).writeToBuffer(),
           );
         case pb.WiFiScanMsgType.TypeCmdScanStatus:
+          scanStatusReads++;
           _nextRead = Uint8List.fromList(
             pb.WiFiScanPayload(
               msg: pb.WiFiScanMsgType.TypeRespScanStatus,
               status: pb.Status.Success,
               respScanStatus: pb.RespScanStatus(
-                scanFinished: true,
+                scanFinished: !delayedScanFinish || scanStatusReads > 1,
                 resultCount: 1,
               ),
             ).writeToBuffer(),
           );
         case pb.WiFiScanMsgType.TypeCmdScanResult:
+          scanResultReads++;
           _nextRead = Uint8List.fromList(
             pb.WiFiScanPayload(
               msg: pb.WiFiScanMsgType.TypeRespScanResult,

@@ -40,6 +40,26 @@ class WiFiScanOptions {
   final int periodMs;
 }
 
+/// Wi-Fi scan progress reported by the ESP device.
+class WiFiScanStatus {
+  /// Creates a Wi-Fi scan status snapshot.
+  const WiFiScanStatus({required this.scanFinished, required this.resultCount});
+
+  /// Whether the ESP device has finished the active scan.
+  final bool scanFinished;
+
+  /// Number of scan results currently available.
+  final int resultCount;
+
+  /// Converts a protobuf scan status response into a public model.
+  factory WiFiScanStatus.fromProto(pb.RespScanStatus status) {
+    return WiFiScanStatus(
+      scanFinished: status.scanFinished,
+      resultCount: status.resultCount,
+    );
+  }
+}
+
 /// Wi-Fi credentials and optional access point hints sent to the ESP device.
 class WiFiConfig {
   /// Creates a Wi-Fi configuration for [ssid].

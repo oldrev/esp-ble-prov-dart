@@ -18,6 +18,7 @@ extension type _BluetoothDevice(JSObject _) implements JSObject {
   external String get id;
   external String? get name;
   external _BluetoothRemoteGATTServer? get gatt;
+  external void addEventListener(String type, JSFunction listener);
 }
 
 extension type _BluetoothRemoteGATTServer(JSObject _) implements JSObject {
@@ -56,9 +57,16 @@ class WebEspBleTransport implements EspBleTransport {
   static final Map<String, _BluetoothRemoteGATTService> _services = {};
   static final Map<String, _BluetoothRemoteGATTCharacteristic>
   _characteristics = {};
+  final Map<String, StreamController<bool>> _connectionControllers = {};
+  final Map<String, JSFunction> _disconnectListeners = {};
 
   @override
   Stream<BleDevice> get scanStream => _scanController.stream;
+
+  @override
+  Stream<bool> connectionStream(String deviceId) {
+    return _connectionController(deviceId).stream;
+  }
 
   @override
   Future<void> requestPermissions({
@@ -92,6 +100,7 @@ class WebEspBleTransport implements EspBleTransport {
 
     final device = await bluetooth.requestDevice(options).toDart;
     _devices[device.id] = device;
+    _registerDisconnectListener(device);
     _scanController.add(BleDevice(deviceId: device.id, name: device.name));
   }
 
@@ -113,6 +122,7 @@ class WebEspBleTransport implements EspBleTransport {
     }
     final service = await server.getPrimaryService(serviceUuid).toDart;
     _services[deviceId] = service;
+    _connectionController(deviceId).add(true);
   }
 
   @override
@@ -120,6 +130,7 @@ class WebEspBleTransport implements EspBleTransport {
     _devices[deviceId]?.gatt?.disconnect();
     _services.remove(deviceId);
     _characteristics.removeWhere((key, _) => key.startsWith('$deviceId|'));
+    _connectionController(deviceId).add(false);
   }
 
   @override
@@ -203,6 +214,27 @@ class WebEspBleTransport implements EspBleTransport {
     final device = _devices[deviceId];
     if (device == null) throw StateError('Device $deviceId not found.');
     return device;
+  }
+
+  StreamController<bool> _connectionController(String deviceId) {
+    return _connectionControllers.putIfAbsent(
+      deviceId,
+      () => StreamController<bool>.broadcast(),
+    );
+  }
+
+  void _registerDisconnectListener(_BluetoothDevice device) {
+    if (_disconnectListeners.containsKey(device.id)) return;
+    final listener =
+        ((JSAny? _) {
+          _services.remove(device.id);
+          _characteristics.removeWhere(
+            (key, _) => key.startsWith('${device.id}|'),
+          );
+          _connectionController(device.id).add(false);
+        }).toJS;
+    _disconnectListeners[device.id] = listener;
+    device.addEventListener('gattserverdisconnected', listener);
   }
 
   Future<_BluetoothRemoteGATTService> _getService(String deviceId) async {

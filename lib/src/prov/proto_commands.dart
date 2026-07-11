@@ -10,6 +10,60 @@ void _ensureStatus(pb.Status status, String operation) {
   }
 }
 
+void _ensureMessage<T>(T actual, T expected, String operation) {
+  if (actual != expected) {
+    throw ProvisionerError(
+      '$operation returned unexpected message type: $actual.',
+    );
+  }
+}
+
+void _validateScanOptions(WiFiScanOptions options) {
+  if (options.groupChannels < 0) {
+    throw const ProvisionerError('Wi-Fi scan groupChannels must be >= 0.');
+  }
+  if (options.periodMs < 0) {
+    throw const ProvisionerError('Wi-Fi scan periodMs must be >= 0.');
+  }
+}
+
+void _validateScanResultRange({required int startIndex, required int count}) {
+  if (startIndex < 0) {
+    throw const ProvisionerError('Wi-Fi scan startIndex must be >= 0.');
+  }
+  if (count <= 0) {
+    throw const ProvisionerError('Wi-Fi scan result count must be > 0.');
+  }
+}
+
+void _validateWiFiConfig(WiFiConfig config) {
+  final ssidBytes = config.ssidBytes;
+  if (ssidBytes.isEmpty || ssidBytes.length > 32) {
+    throw ProvisionerError(
+      'Wi-Fi SSID must be 1..32 UTF-8 bytes, got ${ssidBytes.length}.',
+    );
+  }
+
+  final passphraseBytes = config.passphraseBytes;
+  if (passphraseBytes.length > 64) {
+    throw ProvisionerError(
+      'Wi-Fi passphrase must be <= 64 UTF-8 bytes, got '
+      '${passphraseBytes.length}.',
+    );
+  }
+
+  final bssid = config.bssid;
+  if (bssid != null && bssid.length != 6) {
+    throw ProvisionerError('Wi-Fi BSSID must be 6 bytes, got ${bssid.length}.');
+  }
+
+  if (config.channel < 0 || config.channel > 14) {
+    throw ProvisionerError(
+      'Wi-Fi channel must be in range 0..14, got ${config.channel}.',
+    );
+  }
+}
+
 Uint8List ctrlResetRequest() {
   return Uint8List.fromList(
     pb.WiFiCtrlPayload(
@@ -21,6 +75,14 @@ Uint8List ctrlResetRequest() {
 
 void ctrlResetResponse(Uint8List response) {
   final payload = pb.WiFiCtrlPayload.fromBuffer(response);
+  _ensureMessage(
+    payload.msg,
+    pb.WiFiCtrlMsgType.TypeRespCtrlReset,
+    'Reset provisioning state',
+  );
+  if (!payload.hasRespCtrlReset()) {
+    throw const ProvisionerError('Missing reset provisioning response.');
+  }
   _ensureStatus(payload.status, 'Reset provisioning state');
 }
 
@@ -35,10 +97,19 @@ Uint8List ctrlReprovRequest() {
 
 void ctrlReprovResponse(Uint8List response) {
   final payload = pb.WiFiCtrlPayload.fromBuffer(response);
+  _ensureMessage(
+    payload.msg,
+    pb.WiFiCtrlMsgType.TypeRespCtrlReprov,
+    'Re-provision',
+  );
+  if (!payload.hasRespCtrlReprov()) {
+    throw const ProvisionerError('Missing re-provision response.');
+  }
   _ensureStatus(payload.status, 'Re-provision');
 }
 
 Uint8List scanStartRequest(WiFiScanOptions options) {
+  _validateScanOptions(options);
   return Uint8List.fromList(
     pb.WiFiScanPayload(
       msg: pb.WiFiScanMsgType.TypeCmdScanStart,
@@ -55,6 +126,14 @@ Uint8List scanStartRequest(WiFiScanOptions options) {
 
 void scanStartResponse(Uint8List response) {
   final payload = pb.WiFiScanPayload.fromBuffer(response);
+  _ensureMessage(
+    payload.msg,
+    pb.WiFiScanMsgType.TypeRespScanStart,
+    'Start Wi-Fi scan',
+  );
+  if (!payload.hasRespScanStart()) {
+    throw const ProvisionerError('Missing start Wi-Fi scan response.');
+  }
   _ensureStatus(payload.status, 'Start Wi-Fi scan');
 }
 
@@ -68,13 +147,22 @@ Uint8List scanStatusRequest() {
   );
 }
 
-int scanStatusResponse(Uint8List response) {
+WiFiScanStatus scanStatusResponse(Uint8List response) {
   final payload = pb.WiFiScanPayload.fromBuffer(response);
+  _ensureMessage(
+    payload.msg,
+    pb.WiFiScanMsgType.TypeRespScanStatus,
+    'Get scan status',
+  );
+  if (!payload.hasRespScanStatus()) {
+    throw const ProvisionerError('Missing Wi-Fi scan status response.');
+  }
   _ensureStatus(payload.status, 'Get scan status');
-  return payload.hasRespScanStatus() ? payload.respScanStatus.resultCount : 0;
+  return WiFiScanStatus.fromProto(payload.respScanStatus);
 }
 
 Uint8List scanResultRequest({required int startIndex, required int count}) {
+  _validateScanResultRange(startIndex: startIndex, count: count);
   return Uint8List.fromList(
     pb.WiFiScanPayload(
       msg: pb.WiFiScanMsgType.TypeCmdScanResult,
@@ -86,10 +174,16 @@ Uint8List scanResultRequest({required int startIndex, required int count}) {
 
 List<WiFiNetwork> scanResultResponse(Uint8List response) {
   final payload = pb.WiFiScanPayload.fromBuffer(response);
+  _ensureMessage(
+    payload.msg,
+    pb.WiFiScanMsgType.TypeRespScanResult,
+    'Get scan results',
+  );
+  if (!payload.hasRespScanResult()) {
+    throw const ProvisionerError('Missing Wi-Fi scan result response.');
+  }
   _ensureStatus(payload.status, 'Get scan results');
-  return payload.hasRespScanResult()
-      ? payload.respScanResult.entries.map(WiFiNetwork.fromProto).toList()
-      : const <WiFiNetwork>[];
+  return payload.respScanResult.entries.map(WiFiNetwork.fromProto).toList();
 }
 
 Uint8List configGetStatusRequest() {
@@ -103,6 +197,11 @@ Uint8List configGetStatusRequest() {
 
 WiFiStatus configGetStatusResponse(Uint8List response) {
   final payload = pb.WiFiConfigPayload.fromBuffer(response);
+  _ensureMessage(
+    payload.msg,
+    pb.WiFiConfigMsgType.TypeRespGetStatus,
+    'Get Wi-Fi status',
+  );
   if (!payload.hasRespGetStatus()) {
     throw const ProvisionerError('Missing Wi-Fi status response.');
   }
@@ -111,6 +210,7 @@ WiFiStatus configGetStatusResponse(Uint8List response) {
 }
 
 Uint8List configSetConfigRequest(WiFiConfig config) {
+  _validateWiFiConfig(config);
   return Uint8List.fromList(
     pb.WiFiConfigPayload(
       msg: pb.WiFiConfigMsgType.TypeCmdSetConfig,
@@ -126,6 +226,11 @@ Uint8List configSetConfigRequest(WiFiConfig config) {
 
 void configSetConfigResponse(Uint8List response) {
   final payload = pb.WiFiConfigPayload.fromBuffer(response);
+  _ensureMessage(
+    payload.msg,
+    pb.WiFiConfigMsgType.TypeRespSetConfig,
+    'Set Wi-Fi config',
+  );
   if (!payload.hasRespSetConfig()) {
     throw const ProvisionerError('Missing set Wi-Fi config response.');
   }
@@ -143,6 +248,11 @@ Uint8List configApplyConfigRequest() {
 
 void configApplyConfigResponse(Uint8List response) {
   final payload = pb.WiFiConfigPayload.fromBuffer(response);
+  _ensureMessage(
+    payload.msg,
+    pb.WiFiConfigMsgType.TypeRespApplyConfig,
+    'Apply Wi-Fi config',
+  );
   if (!payload.hasRespApplyConfig()) {
     throw const ProvisionerError('Missing apply Wi-Fi config response.');
   }

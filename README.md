@@ -73,7 +73,7 @@ Add the package to your Flutter project:
 
 ```yaml
 dependencies:
-  esp_ble_prov_dart: ^0.1.1
+  esp_ble_prov_dart: ^0.3.0
 
 ```
 
