@@ -312,7 +312,7 @@ void main() {
       device: const EspBleDevice(id: 'device-1', name: 'BOPROV_TEST'),
     );
 
-    final networks = await provisioner.scanPaged(pageSize: 4);
+    final networks = await provisioner.scan(pageSize: 4);
 
     expect(networks, hasLength(9));
     expect(transport.scanResultRequests, ['0:4', '4:4', '8:1']);
@@ -325,7 +325,7 @@ void main() {
       endpoints,
     );
 
-    expect(() => provisioner.scanPaged(pageSize: 0), throwsArgumentError);
+    expect(() => provisioner.scan(pageSize: 0), throwsArgumentError);
   });
 
   test('rejects invalid Wi-Fi config before writing credentials', () async {

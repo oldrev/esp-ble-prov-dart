@@ -308,17 +308,7 @@ class EspBleProvisioner {
   ///
   /// Non-blocking scans are not implemented and throw [ProvisionerError].
   /// Results are fetched in small pages to avoid large BLE read responses.
-  Future<List<WiFiNetwork>> scan([
-    WiFiScanOptions options = const WiFiScanOptions(),
-  ]) async {
-    return scanPaged(options: options);
-  }
-
-  /// Runs a blocking Wi-Fi scan with configurable polling and result paging.
-  ///
-  /// Use [pageSize] to keep each BLE scan-result response small on devices or
-  /// platforms that time out when many access points are returned at once.
-  Future<List<WiFiNetwork>> scanPaged({
+  Future<List<WiFiNetwork>> scan({
     WiFiScanOptions options = const WiFiScanOptions(),
     Duration timeout = const Duration(seconds: 45),
     Duration pollInterval = const Duration(seconds: 1),
@@ -355,6 +345,25 @@ class EspBleProvisioner {
     }
     throw ProvisionerError(
       'Wi-Fi scan timed out after ${timeout.inMilliseconds}ms.',
+    );
+  }
+
+  /// Runs a blocking Wi-Fi scan with configurable polling and result paging.
+  ///
+  /// Use [pageSize] to keep each BLE scan-result response small on devices or
+  /// platforms that time out when many access points are returned at once.
+  @Deprecated('Use scan() with named parameters instead.')
+  Future<List<WiFiNetwork>> scanPaged({
+    WiFiScanOptions options = const WiFiScanOptions(),
+    Duration timeout = const Duration(seconds: 45),
+    Duration pollInterval = const Duration(seconds: 1),
+    int pageSize = 4,
+  }) {
+    return scan(
+      options: options,
+      timeout: timeout,
+      pollInterval: pollInterval,
+      pageSize: pageSize,
     );
   }
 

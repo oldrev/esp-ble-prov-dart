@@ -73,7 +73,7 @@ Add the package to your Flutter project:
 
 ```yaml
 dependencies:
-  esp_ble_prov_dart: ^0.3.0
+  esp_ble_prov_dart: ^0.4.0
 
 ```
 
@@ -165,7 +165,7 @@ final provisioner = EspBleProvisioner(
   readRetryInterval: const Duration(milliseconds: 250),
 );
 
-final networks = await provisioner.scanPaged(
+final networks = await provisioner.scan(
   timeout: const Duration(seconds: 45),
   pageSize: 4,
 );
