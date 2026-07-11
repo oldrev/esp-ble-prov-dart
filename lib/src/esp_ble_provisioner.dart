@@ -77,13 +77,25 @@ class EspBleProvisioner {
   /// Set to `0` or a negative value to skip MTU negotiation.
   final int mtu;
 
-  /// Delay inserted between endpoint writes and the matching reads.
+  /// Delay inserted between endpoint writes and matching reads.
+  ///
+  /// This affects all provisioning endpoint exchanges, including
+  /// `prov-session`, `prov-scan`, `prov-config`, custom endpoints, and control
+  /// endpoints.
   final Duration responseDelay;
 
   /// Maximum time to wait for a non-empty endpoint response after a write.
+  ///
+  /// This affects all provisioning endpoint exchanges, including
+  /// `prov-session`, `prov-scan`, `prov-config`, custom endpoints, and control
+  /// endpoints.
   final Duration responseTimeout;
 
   /// Delay between response read attempts while waiting for the device.
+  ///
+  /// This affects all provisioning endpoint exchanges, including
+  /// `prov-session`, `prov-scan`, `prov-config`, custom endpoints, and control
+  /// endpoints.
   final Duration readRetryInterval;
 
   /// Whether encrypted and decrypted endpoint payload previews are logged.
@@ -295,25 +307,55 @@ class EspBleProvisioner {
   /// Runs a blocking Wi-Fi scan and returns available networks.
   ///
   /// Non-blocking scans are not implemented and throw [ProvisionerError].
+  /// Results are fetched in small pages to avoid large BLE read responses.
   Future<List<WiFiNetwork>> scan([
     WiFiScanOptions options = const WiFiScanOptions(),
   ]) async {
+    return scanPaged(options: options);
+  }
+
+  /// Runs a blocking Wi-Fi scan with configurable polling and result paging.
+  ///
+  /// Use [pageSize] to keep each BLE scan-result response small on devices or
+  /// platforms that time out when many access points are returned at once.
+  Future<List<WiFiNetwork>> scanPaged({
+    WiFiScanOptions options = const WiFiScanOptions(),
+    Duration timeout = const Duration(seconds: 45),
+    Duration pollInterval = const Duration(seconds: 1),
+    int pageSize = 4,
+  }) async {
+    if (pageSize <= 0) {
+      throw ArgumentError.value(
+        pageSize,
+        'pageSize',
+        'Must be greater than 0.',
+      );
+    }
     if (!options.blocking) {
       throw const ProvisionerError(
         'Non-blocking Wi-Fi scan is not implemented.',
       );
     }
     await startScan(options);
-    final deadline = DateTime.now().add(const Duration(seconds: 30));
+    final deadline = DateTime.now().add(timeout);
     while (DateTime.now().isBefore(deadline)) {
       final status = await getScanStatusDetails();
       if (status.scanFinished) {
         if (status.resultCount == 0) return const <WiFiNetwork>[];
-        return getScanResults(count: status.resultCount);
+        final networks = <WiFiNetwork>[];
+        for (var start = 0; start < status.resultCount; start += pageSize) {
+          final remaining = status.resultCount - start;
+          final count = remaining < pageSize ? remaining : pageSize;
+          final page = await getScanResults(startIndex: start, count: count);
+          networks.addAll(page);
+        }
+        return networks;
       }
-      await Future<void>.delayed(const Duration(milliseconds: 1000));
+      await Future<void>.delayed(pollInterval);
     }
-    throw const ProvisionerError('Wi-Fi scan timed out after 30000ms.');
+    throw ProvisionerError(
+      'Wi-Fi scan timed out after ${timeout.inMilliseconds}ms.',
+    );
   }
 
   /// Reads the current Wi-Fi connection status from the device.

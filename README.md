@@ -145,6 +145,33 @@ final provisioner = EspBleProvisioner(
 
 ```
 
+### BLE Endpoint Timing and Wi-Fi Scan Paging
+
+`responseDelay`, `responseTimeout`, and `readRetryInterval` apply to every
+provisioning endpoint write/read exchange, including `prov-session`,
+`prov-scan`, `prov-config`, `prov-ctrl`, and custom endpoints.
+
+When many access points are nearby, scan responses can become large enough to
+trigger BLE read timeouts on some devices or platforms. The default `scan()`
+implementation reads results in small pages. For constrained devices, tune the
+MTU, endpoint timeout, retry interval, scan timeout, and page size:
+
+```dart
+final provisioner = EspBleProvisioner(
+  deviceNamePrefix: 'BOPROV_',
+  security: Security1(pop: ''),
+  mtu: 256,
+  responseTimeout: const Duration(seconds: 20),
+  readRetryInterval: const Duration(milliseconds: 250),
+);
+
+final networks = await provisioner.scanPaged(
+  timeout: const Duration(seconds: 45),
+  pageSize: 4,
+);
+
+```
+
 ---
 
 ## License

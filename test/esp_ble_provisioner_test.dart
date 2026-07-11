@@ -300,6 +300,34 @@ void main() {
     expect(transport.scanResultReads, 1);
   });
 
+  test('reads Wi-Fi scan results in pages', () async {
+    final transport = _FakeTransport(
+      serviceUuid: serviceUuid,
+      endpoints: endpoints,
+      networkCount: 9,
+    );
+    final provisioner = _provisioner(transport, serviceUuid, endpoints);
+
+    await provisioner.connect(
+      device: const EspBleDevice(id: 'device-1', name: 'BOPROV_TEST'),
+    );
+
+    final networks = await provisioner.scanPaged(pageSize: 4);
+
+    expect(networks, hasLength(9));
+    expect(transport.scanResultRequests, ['0:4', '4:4', '8:1']);
+  });
+
+  test('rejects invalid Wi-Fi scan page size', () {
+    final provisioner = _provisioner(
+      _FakeTransport(serviceUuid: serviceUuid, endpoints: endpoints),
+      serviceUuid,
+      endpoints,
+    );
+
+    expect(() => provisioner.scanPaged(pageSize: 0), throwsArgumentError);
+  });
+
   test('rejects invalid Wi-Fi config before writing credentials', () async {
     final transport = _FakeTransport(
       serviceUuid: serviceUuid,
@@ -409,6 +437,7 @@ class _FakeTransport implements EspBleTransport {
     String? discoveredServiceUuid,
     this.protoVersionResponseOnScan = false,
     this.delayedScanFinish = false,
+    this.networkCount = 1,
   }) : discoveredServiceUuid = discoveredServiceUuid ?? serviceUuid;
 
   final String serviceUuid;
@@ -416,10 +445,12 @@ class _FakeTransport implements EspBleTransport {
   final Map<String, String> endpoints;
   final bool protoVersionResponseOnScan;
   final bool delayedScanFinish;
+  final int networkCount;
   final _scanController = StreamController<BleDevice>.broadcast();
   final Map<String, StreamController<bool>> _connectionControllers = {};
   final List<_WriteRecord> writes = [];
   final List<pb.WiFiConfigPayload> decodedConfigWrites = [];
+  final List<String> scanResultRequests = [];
   int disconnects = 0;
   int? requestedMtu;
   int scanStatusReads = 0;
@@ -562,26 +593,42 @@ class _FakeTransport implements EspBleTransport {
               status: pb.Status.Success,
               respScanStatus: pb.RespScanStatus(
                 scanFinished: !delayedScanFinish || scanStatusReads > 1,
-                resultCount: 1,
+                resultCount: networkCount,
               ),
             ).writeToBuffer(),
           );
         case pb.WiFiScanMsgType.TypeCmdScanResult:
           scanResultReads++;
+          scanResultRequests.add(
+            '${request.cmdScanResult.startIndex}:${request.cmdScanResult.count}',
+          );
+          final startIndex = request.cmdScanResult.startIndex;
+          final count = request.cmdScanResult.count;
+          final actualCount =
+              startIndex >= networkCount
+                  ? 0
+                  : (networkCount - startIndex < count
+                      ? networkCount - startIndex
+                      : count);
           _nextRead = Uint8List.fromList(
             pb.WiFiScanPayload(
               msg: pb.WiFiScanMsgType.TypeRespScanResult,
               status: pb.Status.Success,
               respScanResult: pb.RespScanResult(
-                entries: [
-                  pb.WiFiScanResult(
-                    ssid: 'Lab WiFi'.codeUnits,
+                entries: List.generate(actualCount, (offset) {
+                  final index = startIndex + offset;
+                  return pb.WiFiScanResult(
+                    ssid:
+                        (networkCount == 1
+                                ? 'Lab WiFi'
+                                : 'Lab WiFi ${index + 1}')
+                            .codeUnits,
                     channel: 6,
-                    rssi: -42,
+                    rssi: -42 - index,
                     bssid: [1, 2, 3, 4, 5, 6],
                     auth: pb.WifiAuthMode.WPA2_PSK,
-                  ),
-                ],
+                  );
+                }),
               ),
             ).writeToBuffer(),
           );
