@@ -47,7 +47,7 @@ class EspBleProvisioner {
     this.requestAndroidFineLocation = false,
     this.mtu = 517,
     this.responseDelay = const Duration(milliseconds: 200),
-    this.responseTimeout = const Duration(seconds: 5),
+    this.responseTimeout = const Duration(seconds: 15),
     this.readRetryInterval = const Duration(milliseconds: 100),
     this.logPayloads = false,
     void Function(String message)? onLog,
