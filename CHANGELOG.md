@@ -1,3 +1,7 @@
+## 0.5.0
+
+- Published by mistake. No intended release changes.
+
 ## 0.4.0
 
 - Added serialized provisioning exchanges to keep Security1 AES-CTR state aligned.
