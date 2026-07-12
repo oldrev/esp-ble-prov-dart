@@ -1,3 +1,13 @@
+## 0.5.1
+
+- Fixed Web Bluetooth writes for `Uint8List` views with non-zero offsets.
+- Serialized complete scan and credential provisioning workflows atomically.
+- Added connection-generation invalidation and idempotent `dispose()` cleanup.
+- Invalidated Security1 sessions after uncertain transport failures.
+- Added atomic custom endpoint request/response exchange API.
+- Removed payload bytes from default logs and error messages.
+- Improved Web Bluetooth cache, listener, and stream cleanup.
+
 ## 0.5.0
 
 - Published by mistake. No intended release changes.
