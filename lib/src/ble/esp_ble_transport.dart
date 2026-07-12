@@ -13,6 +13,10 @@ class BleEndpoint {
   final String characteristicUuid;
 }
 
+/// Returns a tightly packed copy suitable for BLE APIs that accept a backing
+/// buffer rather than a typed-data view.
+Uint8List compactBleWriteValue(Uint8List value) => Uint8List.fromList(value);
+
 abstract class EspBleTransport {
   Stream<BleDevice> get scanStream;
 
@@ -44,6 +48,11 @@ abstract class EspBleTransport {
     bool withoutResponse = false,
     Duration? timeout,
   });
+}
+
+/// Optional lifecycle contract for transports that own disposable resources.
+abstract class DisposableEspBleTransport {
+  Future<void> dispose();
 }
 
 class UniversalBleTransport implements EspBleTransport {

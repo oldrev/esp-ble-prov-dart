@@ -25,9 +25,39 @@ class Security1 extends Security {
   Uint8List? _deviceRandom;
   SecretKey? _secretKey;
   int _keyStreamIndex = 0;
+  bool _established = false;
+  bool _invalidated = false;
+
+  /// Whether the current Security1 session completed mutual verification.
+  bool get isEstablished => _established && !_invalidated;
+
+  @override
+  void reset() {
+    _keyPair = null;
+    _publicKey = null;
+    _devicePublicKey = null;
+    _deviceRandom = null;
+    _secretKey = null;
+    _keyStreamIndex = 0;
+    _established = false;
+    _invalidated = false;
+  }
+
+  @override
+  void invalidate([Object? cause]) {
+    _established = false;
+    _invalidated = true;
+    _keyPair = null;
+    _publicKey = null;
+    _devicePublicKey = null;
+    _deviceRandom = null;
+    _secretKey = null;
+    _keyStreamIndex = 0;
+  }
 
   @override
   Future<Uint8List> setup0Request() async {
+    reset();
     _keyPair = await _x25519.newKeyPair();
     final publicKey = await _keyPair!.extractPublicKey();
     _publicKey = Uint8List.fromList(publicKey.bytes);
@@ -95,7 +125,7 @@ class Security1 extends Security {
       throw const ProvisionerError('Security1 command0 is not complete.');
     }
 
-    final encryptedDeviceKey = await _crypt(devicePublicKey);
+    final encryptedDeviceKey = await _crypt(devicePublicKey, handshake: true);
     return Uint8List.fromList(
       pb.SessionData(
         secVer: pb.SecSchemeVersion.SecScheme1,
@@ -127,10 +157,15 @@ class Security1 extends Security {
       throw const ProvisionerError('Security1 response missing verify data.');
     }
 
-    final decrypted = await _crypt(Uint8List.fromList(sr1.deviceVerifyData));
+    final decrypted = await _crypt(
+      Uint8List.fromList(sr1.deviceVerifyData),
+      handshake: true,
+    );
     if (!_constantTimeEquals(decrypted, publicKey)) {
+      invalidate();
       throw const ProvisionerError('Security1 device verification failed.');
     }
+    _established = true;
   }
 
   @override
@@ -139,10 +174,19 @@ class Security1 extends Security {
   @override
   Future<Uint8List> decrypt(Uint8List data) => _crypt(data);
 
-  Future<Uint8List> _crypt(Uint8List data) async {
+  Future<Uint8List> _crypt(Uint8List data, {bool handshake = false}) async {
+    if (_invalidated) {
+      throw const ProvisionerError(
+        'Security1 session is invalid after a transport failure. Disconnect '
+        'and establish a new session.',
+      );
+    }
     final secretKey = _secretKey;
     final nonce = _deviceRandom;
     if (secretKey == null || nonce == null) {
+      throw const ProvisionerError('Security1 session is not established.');
+    }
+    if (!_established && !handshake) {
       throw const ProvisionerError('Security1 session is not established.');
     }
 

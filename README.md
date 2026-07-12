@@ -172,6 +172,27 @@ final networks = await provisioner.scan(
 
 ```
 
+### Lifecycle and Custom Endpoints
+
+Provisioning operations are serialized as complete transactions. For custom
+protocomm endpoints, prefer the atomic request/response API so Security1 stream
+state cannot be interleaved with another operation:
+
+```dart
+provisioner.registerCustomEndpoint('device-id');
+final response = await provisioner.exchangeValueToEndpoint(
+  'device-id',
+  Uint8List.fromList(requestBytes),
+);
+
+await provisioner.dispose(); // Idempotently disconnects and releases resources.
+```
+
+An uncertain BLE write/read failure invalidates a stateful Security1 session.
+Disconnect and establish a new session instead of retrying on the same session.
+Payload bytes are omitted from logs by default; `logPayloads: true` is intended
+only for controlled debugging and may expose provisioning data.
+
 ---
 
 ## License

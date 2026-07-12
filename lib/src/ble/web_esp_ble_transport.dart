@@ -19,6 +19,7 @@ extension type _BluetoothDevice(JSObject _) implements JSObject {
   external String? get name;
   external _BluetoothRemoteGATTServer? get gatt;
   external void addEventListener(String type, JSFunction listener);
+  external void removeEventListener(String type, JSFunction listener);
 }
 
 extension type _BluetoothRemoteGATTServer(JSObject _) implements JSObject {
@@ -48,15 +49,14 @@ extension type _BluetoothRemoteGATTCharacteristic(JSObject _)
   external JSPromise<JSAny?> writeValueWithoutResponse(JSArrayBuffer value);
 }
 
-class WebEspBleTransport implements EspBleTransport {
+class WebEspBleTransport implements EspBleTransport, DisposableEspBleTransport {
   WebEspBleTransport({required this.serviceUuid});
 
   final String serviceUuid;
   final _scanController = StreamController<BleDevice>.broadcast();
-  static final Map<String, _BluetoothDevice> _devices = {};
-  static final Map<String, _BluetoothRemoteGATTService> _services = {};
-  static final Map<String, _BluetoothRemoteGATTCharacteristic>
-  _characteristics = {};
+  final Map<String, _BluetoothDevice> _devices = {};
+  final Map<String, _BluetoothRemoteGATTService> _services = {};
+  final Map<String, _BluetoothRemoteGATTCharacteristic> _characteristics = {};
   final Map<String, StreamController<bool>> _connectionControllers = {};
   final Map<String, JSFunction> _disconnectListeners = {};
 
@@ -127,10 +127,14 @@ class WebEspBleTransport implements EspBleTransport {
 
   @override
   Future<void> disconnect(String deviceId, {Duration? timeout}) async {
-    _devices[deviceId]?.gatt?.disconnect();
-    _services.remove(deviceId);
-    _characteristics.removeWhere((key, _) => key.startsWith('$deviceId|'));
-    _connectionController(deviceId).add(false);
+    final controller = _connectionControllers[deviceId];
+    final device = _devices[deviceId];
+    _removeDisconnectListener(deviceId);
+    device?.gatt?.disconnect();
+    _releaseDeviceCaches(deviceId);
+    if (controller != null && !controller.isClosed) controller.add(false);
+    await controller?.close();
+    _connectionControllers.remove(deviceId);
   }
 
   @override
@@ -198,11 +202,9 @@ class WebEspBleTransport implements EspBleTransport {
       serviceUuid,
       characteristicUuid,
     );
-    final buffer =
-        value.buffer
-            .asUint8List(value.offsetInBytes, value.lengthInBytes)
-            .buffer
-            .toJS;
+    // A TypedData view keeps its original backing buffer. Copy the visible
+    // range so Web Bluetooth never receives bytes outside this Uint8List.
+    final buffer = compactBleWriteValue(value).buffer.toJS;
     final future =
         withoutResponse
             ? characteristic.writeValueWithoutResponse(buffer).toDart
@@ -227,14 +229,45 @@ class WebEspBleTransport implements EspBleTransport {
     if (_disconnectListeners.containsKey(device.id)) return;
     final listener =
         ((JSAny? _) {
-          _services.remove(device.id);
-          _characteristics.removeWhere(
-            (key, _) => key.startsWith('${device.id}|'),
-          );
-          _connectionController(device.id).add(false);
+          final controller = _connectionControllers[device.id];
+          if (controller != null && !controller.isClosed) {
+            controller.add(false);
+            unawaited(controller.close());
+          }
+          _connectionControllers.remove(device.id);
+          _disconnectListeners.remove(device.id);
+          _releaseDeviceCaches(device.id);
         }).toJS;
     _disconnectListeners[device.id] = listener;
     device.addEventListener('gattserverdisconnected', listener);
+  }
+
+  void _removeDisconnectListener(String deviceId) {
+    final listener = _disconnectListeners.remove(deviceId);
+    final device = _devices[deviceId];
+    if (listener != null && device != null) {
+      device.removeEventListener('gattserverdisconnected', listener);
+    }
+  }
+
+  void _releaseDeviceCaches(String deviceId) {
+    _services.remove(deviceId);
+    _characteristics.removeWhere((key, _) => key.startsWith('$deviceId|'));
+    _devices.remove(deviceId);
+  }
+
+  @override
+  Future<void> dispose() async {
+    for (final deviceId in _devices.keys.toList(growable: false)) {
+      _removeDisconnectListener(deviceId);
+      _devices[deviceId]?.gatt?.disconnect();
+      _releaseDeviceCaches(deviceId);
+    }
+    for (final controller in _connectionControllers.values) {
+      await controller.close();
+    }
+    _connectionControllers.clear();
+    await _scanController.close();
   }
 
   Future<_BluetoothRemoteGATTService> _getService(String deviceId) async {

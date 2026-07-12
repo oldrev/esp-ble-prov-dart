@@ -144,6 +144,50 @@ void main() {
     expect(await host.decrypt(encryptedResponse), [9, 8]);
   });
 
+  test('Security1 rejects use after the session is invalidated', () async {
+    final host = Security1();
+    final command0 = pb.SessionData.fromBuffer(await host.setup0Request());
+    final device = await _Security1Device.create(
+      clientPublicKey: Uint8List.fromList(command0.sec1.sc0.clientPubkey),
+      pop: '',
+    );
+    await host.setup0Response(device.command0Response());
+    final command1 = pb.SessionData.fromBuffer((await host.setup1Request())!);
+    await host.setup1Response(
+      await device.command1Response(
+        Uint8List.fromList(command1.sec1.sc1.clientVerifyData),
+      ),
+    );
+
+    host.invalidate(StateError('uncertain BLE write'));
+
+    await expectLater(
+      host.encrypt(Uint8List.fromList([1, 2, 3])),
+      throwsA(
+        isA<ProvisionerError>().having(
+          (error) => error.message,
+          'message',
+          contains('session is invalid'),
+        ),
+      ),
+    );
+  });
+
+  test('Security1 rejects application data before proof completes', () async {
+    final host = Security1();
+    final command0 = pb.SessionData.fromBuffer(await host.setup0Request());
+    final device = await _Security1Device.create(
+      clientPublicKey: Uint8List.fromList(command0.sec1.sc0.clientPubkey),
+      pop: '',
+    );
+    await host.setup0Response(device.command0Response());
+
+    await expectLater(
+      host.encrypt(Uint8List.fromList([1, 2, 3])),
+      throwsA(isA<ProvisionerError>()),
+    );
+  });
+
   test('Dart AES-CTR matches the JavaScript aes-js reference stream', () async {
     const aes = DartAesCtr.with256bits(
       macAlgorithm: MacAlgorithm.empty,
@@ -373,7 +417,7 @@ void main() {
       '0000aaaa-0000-1000-8000-00805f9b34fb',
     );
 
-    await provisioner.writeValueToEndpoint(
+    await provisioner.exchangeValueToEndpoint(
       'device-id',
       Uint8List.fromList([10, 20, 30]),
     );
@@ -399,7 +443,7 @@ void main() {
     );
     provisioner.registerCustomEndpoint('device-id');
 
-    await provisioner.writeValueToEndpoint(
+    await provisioner.exchangeValueToEndpoint(
       'device-id',
       Uint8List.fromList([10, 20, 30]),
     );
@@ -408,6 +452,189 @@ void main() {
       transport.writes.last.characteristic,
       '0000ff54-0000-1000-8000-00805f9b34fb',
     );
+  });
+
+  test('exchanges custom endpoint values atomically', () async {
+    final transport = _FakeTransport(
+      serviceUuid: serviceUuid,
+      endpoints: {
+        ...endpoints,
+        'device-id': '0000aaaa-0000-1000-8000-00805f9b34fb',
+      },
+    );
+    final provisioner = _provisioner(transport, serviceUuid, endpoints);
+    await provisioner.connect(
+      device: const EspBleDevice(id: 'device-1', name: 'BOPROV_TEST'),
+    );
+    provisioner.registerEndpoint(
+      'device-id',
+      '0000aaaa-0000-1000-8000-00805f9b34fb',
+    );
+
+    final response = await provisioner.exchangeValueToEndpoint(
+      'device-id',
+      Uint8List.fromList([10, 20, 30]),
+    );
+
+    expect(response, [10, 20, 30]);
+  });
+
+  test('keeps the complete credential flow atomic', () async {
+    final writeStarted = Completer<void>();
+    final writeGate = Completer<void>();
+    final transport = _FakeTransport(
+      serviceUuid: serviceUuid,
+      endpoints: endpoints,
+      firstConfigWriteStarted: writeStarted,
+      firstConfigWriteGate: writeGate,
+    );
+    final provisioner = _provisioner(transport, serviceUuid, endpoints);
+    await provisioner.connect(
+      device: const EspBleDevice(id: 'device-1', name: 'BOPROV_TEST'),
+    );
+
+    final credentials = provisioner.sendCredentials(
+      const WiFiConfig(ssid: 'Lab WiFi', passphrase: 'secret'),
+    );
+    await writeStarted.future;
+    final scan = provisioner.startScan();
+    writeGate.complete();
+
+    await credentials;
+    await scan;
+    expect(transport.operationLog, [
+      'config:set',
+      'config:apply',
+      'config:status',
+      'scan:start',
+    ]);
+  });
+
+  test('disconnect invalidates in-flight and queued operations', () async {
+    final writeStarted = Completer<void>();
+    final writeGate = Completer<void>();
+    final transport = _FakeTransport(
+      serviceUuid: serviceUuid,
+      endpoints: endpoints,
+      firstConfigWriteStarted: writeStarted,
+      firstConfigWriteGate: writeGate,
+    );
+    final provisioner = _provisioner(transport, serviceUuid, endpoints);
+    await provisioner.connect(
+      device: const EspBleDevice(id: 'device-1', name: 'BOPROV_TEST'),
+    );
+
+    final credentials = provisioner.sendCredentials(
+      const WiFiConfig(ssid: 'Lab WiFi', passphrase: 'secret'),
+    );
+    await writeStarted.future;
+    final queuedScan = provisioner.startScan();
+    final disconnect = provisioner.disconnect();
+    writeGate.complete();
+
+    await expectLater(credentials, throwsA(isA<ProvisionerError>()));
+    await expectLater(queuedScan, throwsA(isA<ProvisionerError>()));
+    await disconnect;
+    expect(provisioner.isConnected, isFalse);
+    expect(transport.operationLog, ['config:set']);
+  });
+
+  test('disconnect cancels an in-flight connection attempt', () async {
+    final connectStarted = Completer<void>();
+    final connectGate = Completer<void>();
+    final transport = _FakeTransport(
+      serviceUuid: serviceUuid,
+      endpoints: endpoints,
+      connectStarted: connectStarted,
+      connectGate: connectGate,
+    );
+    final provisioner = _provisioner(transport, serviceUuid, endpoints);
+
+    final connecting = provisioner.connect(
+      device: const EspBleDevice(id: 'device-1', name: 'BOPROV_TEST'),
+    );
+    await connectStarted.future;
+    final disconnect = provisioner.disconnect();
+    connectGate.complete();
+
+    await expectLater(connecting, throwsA(isA<ProvisionerError>()));
+    await disconnect;
+    expect(provisioner.isConnected, isFalse);
+  });
+
+  test('invalidates security after an uncertain transport failure', () async {
+    final security = _TrackingSecurity();
+    final transport = _FakeTransport(
+      serviceUuid: serviceUuid,
+      endpoints: endpoints,
+      failNextWrite: true,
+    );
+    final provisioner = EspBleProvisioner(
+      serviceUuid: serviceUuid,
+      transport: transport,
+      security: security,
+    );
+    await provisioner.connect(
+      device: const EspBleDevice(id: 'device-1', name: 'BOPROV_TEST'),
+    );
+
+    await expectLater(provisioner.startScan(), throwsA(isA<StateError>()));
+    expect(security.invalidated, isTrue);
+  });
+
+  test('does not log payload bytes unless explicitly enabled', () async {
+    final logs = <String>[];
+    final transport = _FakeTransport(
+      serviceUuid: serviceUuid,
+      endpoints: endpoints,
+    );
+    final provisioner = EspBleProvisioner(
+      serviceUuid: serviceUuid,
+      transport: transport,
+      security: const Security0(),
+      onLog: logs.add,
+    );
+    await provisioner.connect(
+      device: const EspBleDevice(id: 'device-1', name: 'BOPROV_TEST'),
+    );
+    await provisioner.setWiFiConfig(
+      const WiFiConfig(ssid: 'Private SSID', passphrase: 'secret'),
+    );
+
+    final combined = logs.join('\n');
+    expect(combined, isNot(contains('Private SSID')));
+    expect(combined, isNot(contains('secret')));
+    expect(combined, isNot(contains('73 65 63 72 65 74')));
+    expect(combined, isNot(contains('Write payload')));
+  });
+
+  test('compacts BLE write views to their visible byte range', () {
+    final backing = Uint8List.fromList([1, 2, 3, 4, 5]);
+    final view = Uint8List.sublistView(backing, 1, 4);
+
+    final compact = compactBleWriteValue(view);
+
+    expect(compact, [2, 3, 4]);
+    expect(compact.offsetInBytes, 0);
+    expect(compact.buffer.lengthInBytes, 3);
+  });
+
+  test('dispose is idempotent and rejects later operations', () async {
+    final transport = _FakeTransport(
+      serviceUuid: serviceUuid,
+      endpoints: endpoints,
+    );
+    final provisioner = _provisioner(transport, serviceUuid, endpoints);
+    await provisioner.connect(
+      device: const EspBleDevice(id: 'device-1', name: 'BOPROV_TEST'),
+    );
+
+    await provisioner.dispose();
+    await provisioner.dispose();
+
+    expect(transport.disposed, isTrue);
+    expect(provisioner.isConnected, isFalse);
+    expect(() => provisioner.startScan(), throwsA(isA<ProvisionerError>()));
   });
 }
 
@@ -430,7 +657,7 @@ class _WriteRecord {
   final Uint8List value;
 }
 
-class _FakeTransport implements EspBleTransport {
+class _FakeTransport implements EspBleTransport, DisposableEspBleTransport {
   _FakeTransport({
     required this.serviceUuid,
     required this.endpoints,
@@ -438,6 +665,11 @@ class _FakeTransport implements EspBleTransport {
     this.protoVersionResponseOnScan = false,
     this.delayedScanFinish = false,
     this.networkCount = 1,
+    this.firstConfigWriteStarted,
+    this.firstConfigWriteGate,
+    this.failNextWrite = false,
+    this.connectStarted,
+    this.connectGate,
   }) : discoveredServiceUuid = discoveredServiceUuid ?? serviceUuid;
 
   final String serviceUuid;
@@ -446,15 +678,22 @@ class _FakeTransport implements EspBleTransport {
   final bool protoVersionResponseOnScan;
   final bool delayedScanFinish;
   final int networkCount;
+  final Completer<void>? firstConfigWriteStarted;
+  final Completer<void>? firstConfigWriteGate;
+  bool failNextWrite;
+  final Completer<void>? connectStarted;
+  final Completer<void>? connectGate;
   final _scanController = StreamController<BleDevice>.broadcast();
   final Map<String, StreamController<bool>> _connectionControllers = {};
   final List<_WriteRecord> writes = [];
   final List<pb.WiFiConfigPayload> decodedConfigWrites = [];
   final List<String> scanResultRequests = [];
+  final List<String> operationLog = [];
   int disconnects = 0;
   int? requestedMtu;
   int scanStatusReads = 0;
   int scanResultReads = 0;
+  bool disposed = false;
 
   Uint8List _nextRead = Uint8List(0);
   bool _connected = false;
@@ -491,6 +730,8 @@ class _FakeTransport implements EspBleTransport {
 
   @override
   Future<void> connect(String deviceId, {Duration? timeout}) async {
+    if (connectStarted?.isCompleted == false) connectStarted!.complete();
+    await connectGate?.future;
     _connected = true;
     emitConnection(deviceId, true);
   }
@@ -552,6 +793,10 @@ class _FakeTransport implements EspBleTransport {
     bool withoutResponse = false,
     Duration? timeout,
   }) async {
+    if (failNextWrite) {
+      failNextWrite = false;
+      throw StateError('simulated uncertain BLE write failure');
+    }
     writes.add(_WriteRecord(characteristic: characteristicUuid, value: value));
 
     if (_same(characteristicUuid, endpoints[provSessionEndpoint]!)) {
@@ -578,6 +823,7 @@ class _FakeTransport implements EspBleTransport {
       final request = pb.WiFiScanPayload.fromBuffer(value);
       switch (request.msg) {
         case pb.WiFiScanMsgType.TypeCmdScanStart:
+          operationLog.add('scan:start');
           _nextRead = Uint8List.fromList(
             pb.WiFiScanPayload(
               msg: pb.WiFiScanMsgType.TypeRespScanStart,
@@ -586,6 +832,7 @@ class _FakeTransport implements EspBleTransport {
             ).writeToBuffer(),
           );
         case pb.WiFiScanMsgType.TypeCmdScanStatus:
+          operationLog.add('scan:status');
           scanStatusReads++;
           _nextRead = Uint8List.fromList(
             pb.WiFiScanPayload(
@@ -598,6 +845,7 @@ class _FakeTransport implements EspBleTransport {
             ).writeToBuffer(),
           );
         case pb.WiFiScanMsgType.TypeCmdScanResult:
+          operationLog.add('scan:result');
           scanResultReads++;
           scanResultRequests.add(
             '${request.cmdScanResult.startIndex}:${request.cmdScanResult.count}',
@@ -643,6 +891,7 @@ class _FakeTransport implements EspBleTransport {
       decodedConfigWrites.add(request);
       switch (request.msg) {
         case pb.WiFiConfigMsgType.TypeCmdSetConfig:
+          operationLog.add('config:set');
           _nextRead = Uint8List.fromList(
             pb.WiFiConfigPayload(
               msg: pb.WiFiConfigMsgType.TypeRespSetConfig,
@@ -650,6 +899,7 @@ class _FakeTransport implements EspBleTransport {
             ).writeToBuffer(),
           );
         case pb.WiFiConfigMsgType.TypeCmdApplyConfig:
+          operationLog.add('config:apply');
           _nextRead = Uint8List.fromList(
             pb.WiFiConfigPayload(
               msg: pb.WiFiConfigMsgType.TypeRespApplyConfig,
@@ -657,6 +907,7 @@ class _FakeTransport implements EspBleTransport {
             ).writeToBuffer(),
           );
         case pb.WiFiConfigMsgType.TypeCmdGetStatus:
+          operationLog.add('config:status');
           _nextRead = Uint8List.fromList(
             pb.WiFiConfigPayload(
               msg: pb.WiFiConfigMsgType.TypeRespGetStatus,
@@ -676,11 +927,40 @@ class _FakeTransport implements EspBleTransport {
         default:
           throw StateError('unexpected config request: ${request.msg}');
       }
+      if (request.msg == pb.WiFiConfigMsgType.TypeCmdSetConfig &&
+          firstConfigWriteGate != null) {
+        if (firstConfigWriteStarted?.isCompleted == false) {
+          firstConfigWriteStarted!.complete();
+        }
+        await firstConfigWriteGate!.future;
+      }
+      return;
     }
+
+    _nextRead = Uint8List.fromList(value);
+  }
+
+  @override
+  Future<void> dispose() async {
+    disposed = true;
+    await _scanController.close();
+    for (final controller in _connectionControllers.values) {
+      await controller.close();
+    }
+    _connectionControllers.clear();
   }
 
   bool _same(String a, String b) =>
       BleUuidParser.string(a) == BleUuidParser.string(b);
+}
+
+class _TrackingSecurity extends Security0 {
+  bool invalidated = false;
+
+  @override
+  void invalidate([Object? cause]) {
+    invalidated = true;
+  }
 }
 
 class _Security1Device {

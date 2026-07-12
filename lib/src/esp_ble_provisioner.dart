@@ -108,6 +108,9 @@ class EspBleProvisioner {
   Set<String>? _discoveredCharacteristicUuids;
   StreamSubscription<bool>? _connectionSubscription;
   Future<void> _operationTail = Future<void>.value();
+  int _connectionGeneration = 0;
+  int? _activeConnectionGeneration;
+  bool _disposed = false;
 
   EspBleDevice? _device;
   bool _connected = false;
@@ -128,7 +131,25 @@ class EspBleProvisioner {
   Future<List<EspBleDevice>> scanDevices({
     Duration duration = const Duration(seconds: 8),
     List<String>? serviceUuids,
+  }) {
+    _ensureNotDisposed();
+    if (duration <= Duration.zero) {
+      throw ArgumentError.value(
+        duration,
+        'duration',
+        'Must be greater than 0.',
+      );
+    }
+    return _enqueue(
+      () => _scanDevices(duration: duration, serviceUuids: serviceUuids),
+    );
+  }
+
+  Future<List<EspBleDevice>> _scanDevices({
+    required Duration duration,
+    List<String>? serviceUuids,
   }) async {
+    _ensureNotDisposed();
     final devices = <String, EspBleDevice>{};
     final subscription = _transport.scanStream.listen((device) {
       final name = device.name ?? device.rawName;
@@ -136,25 +157,31 @@ class EspBleProvisioner {
       devices[device.deviceId] = EspBleDevice(id: device.deviceId, name: name);
     });
 
-    await _transport.requestPermissions(
-      withAndroidFineLocation: requestAndroidFineLocation,
-    );
-    await _transport.startScan(
-      scanFilter: ScanFilter(
-        withNamePrefix: [deviceNamePrefix],
-        withServices: serviceUuids ?? const [],
-      ),
-      platformConfig:
-          kIsWeb
-              ? PlatformConfig(web: WebOptions(optionalServices: [serviceUuid]))
-              : null,
-    );
-
     try {
-      await Future<void>.delayed(duration);
+      await _transport.requestPermissions(
+        withAndroidFineLocation: requestAndroidFineLocation,
+      );
+      await _transport.startScan(
+        scanFilter: ScanFilter(
+          withNamePrefix: [deviceNamePrefix],
+          withServices: serviceUuids ?? const [],
+        ),
+        platformConfig:
+            kIsWeb
+                ? PlatformConfig(
+                  web: WebOptions(optionalServices: [serviceUuid]),
+                )
+                : null,
+      );
+      // Web Bluetooth's requestDevice() already waits for a user selection and
+      // emits exactly one device; it is not a timed discovery scan.
+      if (!kIsWeb) await Future<void>.delayed(duration);
     } finally {
-      await _transport.stopScan();
-      await subscription.cancel();
+      try {
+        await _transport.stopScan();
+      } finally {
+        await subscription.cancel();
+      }
     }
 
     return devices.values.toList(growable: false);
@@ -169,16 +196,45 @@ class EspBleProvisioner {
     EspBleDevice? device,
     Duration scanDuration = const Duration(seconds: 8),
     Duration connectionTimeout = const Duration(seconds: 60),
+  }) {
+    _ensureNotDisposed();
+    if (isConnected) {
+      throw const ProvisionerError('Already connected. Disconnect first.');
+    }
+    final generation = ++_connectionGeneration;
+    security.reset();
+    return _enqueue(
+      () => _connect(
+        device: device,
+        scanDuration: scanDuration,
+        connectionTimeout: connectionTimeout,
+        generation: generation,
+      ),
+    );
+  }
+
+  Future<EspBleDevice> _connect({
+    EspBleDevice? device,
+    required Duration scanDuration,
+    required Duration connectionTimeout,
+    required int generation,
   }) async {
-    final target = device ?? await _findFirstDevice(scanDuration);
+    _ensureNotDisposed();
+    _ensureConnectionGeneration(generation);
+    final target =
+        device ?? await _findFirstDevice(scanDuration, useInternalScan: true);
+    _ensureConnectionGeneration(generation);
     await _transport.stopScan();
     try {
       await _transport.connect(target.id, timeout: connectionTimeout);
+      _ensureConnectionGeneration(generation);
       _device = target;
       _connected = true;
       _listenForDisconnect(target.id);
       await _requestMtu(target.id);
+      _ensureConnectionGeneration(generation);
       await _discoverProvisioningService();
+      _ensureConnectionGeneration(generation);
       return target;
     } catch (_) {
       await _cleanupFailedConnection(target.id);
@@ -187,7 +243,16 @@ class EspBleProvisioner {
   }
 
   /// Disconnects from the current device and clears local connection state.
-  Future<void> disconnect({Duration? timeout}) async {
+  Future<void> disconnect({Duration? timeout}) {
+    if (_disposed) return Future<void>.value();
+    // Invalidate queued and in-flight protocol work immediately. The physical
+    // disconnect remains serialized behind the currently executing BLE call.
+    security.invalidate();
+    _connectionGeneration++;
+    return _enqueue(() => _disconnect(timeout: timeout));
+  }
+
+  Future<void> _disconnect({Duration? timeout}) async {
     final deviceId = _device?.id;
     if (deviceId != null) {
       try {
@@ -198,6 +263,24 @@ class EspBleProvisioner {
       return;
     }
     _clearConnectionState();
+  }
+
+  /// Releases the connection, subscriptions, queued-operation ownership, and
+  /// transport resources. Calling this method more than once is safe.
+  Future<void> dispose() {
+    if (_disposed) return Future<void>.value();
+    security.invalidate();
+    _connectionGeneration++;
+    return _enqueue(() async {
+      if (_disposed) return;
+      await _disconnect();
+      _disposed = true;
+      _connectionGeneration++;
+      final transport = _transport;
+      if (transport is DisposableEspBleTransport) {
+        await (transport as DisposableEspBleTransport).dispose();
+      }
+    });
   }
 
   /// Performs the security handshake on the prov-session endpoint.
@@ -211,35 +294,26 @@ class EspBleProvisioner {
 
   Future<void> _establishSession() async {
     _ensureConnected();
-
-    final setup0 = await security.setup0Request();
-    _log('Security setup0 request: ${setup0.length} bytes');
-    await _writeEndpoint(provSessionEndpoint, setup0);
-    final setup0Response = await _readEndpointResponse(provSessionEndpoint);
-    _log('Security setup0 response: ${setup0Response.length} bytes');
     try {
+      final setup0 = await security.setup0Request();
+      _log('Security setup0 request: ${setup0.length} bytes');
+      await _writeEndpoint(provSessionEndpoint, setup0);
+      final setup0Response = await _readEndpointResponse(provSessionEndpoint);
+      _log('Security setup0 response: ${setup0Response.length} bytes');
       await security.setup0Response(setup0Response);
-    } catch (error) {
-      throw ProvisionerError(
-        'Security setup0 response parse failed: $error. '
-        'Response: ${_hexPreview(setup0Response)}',
-      );
-    }
 
-    final setup1 = await security.setup1Request();
-    if (setup1 != null) {
-      _log('Security setup1 request: ${setup1.length} bytes');
-      await _writeEndpoint(provSessionEndpoint, setup1);
-      final setup1Response = await _readEndpointResponse(provSessionEndpoint);
-      _log('Security setup1 response: ${setup1Response.length} bytes');
-      try {
+      final setup1 = await security.setup1Request();
+      if (setup1 != null) {
+        _log('Security setup1 request: ${setup1.length} bytes');
+        await _writeEndpoint(provSessionEndpoint, setup1);
+        final setup1Response = await _readEndpointResponse(provSessionEndpoint);
+        _log('Security setup1 response: ${setup1Response.length} bytes');
         await security.setup1Response(setup1Response);
-      } catch (error) {
-        throw ProvisionerError(
-          'Security setup1 response parse failed: $error. '
-          'Response: ${_hexPreview(setup1Response)}',
-        );
       }
+    } catch (error) {
+      security.invalidate(error);
+      if (error is ProvisionerError) rethrow;
+      throw ProvisionerError('Security session establishment failed: $error.');
     }
   }
 
@@ -313,7 +387,7 @@ class EspBleProvisioner {
     Duration timeout = const Duration(seconds: 45),
     Duration pollInterval = const Duration(seconds: 1),
     int pageSize = 4,
-  }) async {
+  }) {
     if (pageSize <= 0) {
       throw ArgumentError.value(
         pageSize,
@@ -326,17 +400,48 @@ class EspBleProvisioner {
         'Non-blocking Wi-Fi scan is not implemented.',
       );
     }
-    await startScan(options);
+    return _runExclusive(
+      () => _scanUnlocked(
+        options: options,
+        timeout: timeout,
+        pollInterval: pollInterval,
+        pageSize: pageSize,
+      ),
+    );
+  }
+
+  Future<List<WiFiNetwork>> _scanUnlocked({
+    required WiFiScanOptions options,
+    required Duration timeout,
+    required Duration pollInterval,
+    required int pageSize,
+  }) async {
+    await _exchangeUnlocked(
+      provScanEndpoint,
+      commands.scanStartRequest(options),
+      'Start Wi-Fi scan',
+      commands.scanStartResponse,
+    );
     final deadline = DateTime.now().add(timeout);
     while (DateTime.now().isBefore(deadline)) {
-      final status = await getScanStatusDetails();
+      final status = await _exchangeUnlocked(
+        provScanEndpoint,
+        commands.scanStatusRequest(),
+        'Get scan status',
+        commands.scanStatusResponse,
+      );
       if (status.scanFinished) {
         if (status.resultCount == 0) return const <WiFiNetwork>[];
         final networks = <WiFiNetwork>[];
         for (var start = 0; start < status.resultCount; start += pageSize) {
           final remaining = status.resultCount - start;
           final count = remaining < pageSize ? remaining : pageSize;
-          final page = await getScanResults(startIndex: start, count: count);
+          final page = await _exchangeUnlocked(
+            provScanEndpoint,
+            commands.scanResultRequest(startIndex: start, count: count),
+            'Get scan results',
+            commands.scanResultResponse,
+          );
           networks.addAll(page);
         }
         return networks;
@@ -401,10 +506,27 @@ class EspBleProvisioner {
   Future<WiFiStatus> waitForWiFiStatus({
     Duration timeout = const Duration(seconds: 60),
     Duration pollInterval = const Duration(seconds: 1),
+  }) {
+    return _runExclusive(
+      () => _waitForWiFiStatusUnlocked(
+        timeout: timeout,
+        pollInterval: pollInterval,
+      ),
+    );
+  }
+
+  Future<WiFiStatus> _waitForWiFiStatusUnlocked({
+    required Duration timeout,
+    required Duration pollInterval,
   }) async {
     final deadline = DateTime.now().add(timeout);
     while (DateTime.now().isBefore(deadline)) {
-      final status = await getWiFiStatus();
+      final status = await _exchangeUnlocked(
+        provConfigEndpoint,
+        commands.configGetStatusRequest(),
+        'Get Wi-Fi status',
+        commands.configGetStatusResponse,
+      );
       if (status.state == pb.WifiStationState.Connected) return status;
       if (status.state == pb.WifiStationState.ConnectionFailed ||
           status.attemptsRemaining == 0) {
@@ -423,32 +545,72 @@ class EspBleProvisioner {
   Future<WiFiStatus> sendCredentials(
     WiFiConfig config, {
     Duration timeout = const Duration(seconds: 60),
-  }) async {
-    await setWiFiConfig(config);
-    await applyWiFiConfig();
-    return waitForWiFiStatus(timeout: timeout);
+  }) {
+    return _runExclusive(() async {
+      await _exchangeUnlocked(
+        provConfigEndpoint,
+        commands.configSetConfigRequest(config),
+        'Set Wi-Fi config',
+        commands.configSetConfigResponse,
+      );
+      await _exchangeUnlocked(
+        provConfigEndpoint,
+        commands.configApplyConfigRequest(),
+        'Apply Wi-Fi config',
+        commands.configApplyConfigResponse,
+      );
+      return _waitForWiFiStatusUnlocked(
+        timeout: timeout,
+        pollInterval: const Duration(seconds: 1),
+      );
+    });
   }
 
   /// Encrypts and writes raw [value] to a registered endpoint.
   ///
   /// Use this for application-defined protocomm endpoints after the security
   /// session has been established.
+  @Deprecated(
+    'Use exchangeValueToEndpoint() for atomic request/response exchanges.',
+  )
   Future<void> writeValueToEndpoint(
     String endpointName,
     Uint8List value,
   ) async {
     await _runExclusive(() async {
-      final encrypted = await security.encrypt(value);
-      await _writeEndpoint(endpointName, encrypted);
+      try {
+        final encrypted = await security.encrypt(value);
+        await _writeEndpoint(endpointName, encrypted);
+      } catch (error) {
+        security.invalidate(error);
+        rethrow;
+      }
     });
   }
 
   /// Reads and decrypts a raw value from a registered endpoint.
+  @Deprecated(
+    'Use exchangeValueToEndpoint() for atomic request/response exchanges.',
+  )
   Future<Uint8List> readValueFromEndpoint(String endpointName) async {
     return _runExclusive(() async {
-      final value = await _readEndpoint(endpointName);
-      return security.decrypt(value);
+      try {
+        final value = await _readEndpoint(endpointName);
+        return security.decrypt(value);
+      } catch (error) {
+        security.invalidate(error);
+        rethrow;
+      }
     });
+  }
+
+  /// Atomically writes [value] and reads its matching response on a custom
+  /// endpoint, keeping stateful security streams aligned.
+  Future<Uint8List> exchangeValueToEndpoint(
+    String endpointName,
+    Uint8List value,
+  ) {
+    return _runExclusive(() => _sendEncrypted(endpointName, value));
   }
 
   /// Registers or overrides an endpoint characteristic UUID by name.
@@ -467,8 +629,14 @@ class EspBleProvisioner {
     );
   }
 
-  Future<EspBleDevice> _findFirstDevice(Duration scanDuration) async {
-    final devices = await scanDevices(duration: scanDuration);
+  Future<EspBleDevice> _findFirstDevice(
+    Duration scanDuration, {
+    bool useInternalScan = false,
+  }) async {
+    final devices =
+        useInternalScan
+            ? await _scanDevices(duration: scanDuration)
+            : await scanDevices(duration: scanDuration);
     if (devices.isEmpty) {
       throw ProvisionerError(
         'No ESP provisioning device found with prefix $deviceNamePrefix.',
@@ -571,26 +739,33 @@ class EspBleProvisioner {
     Uint8List plainRequest,
   ) async {
     _ensureConnected();
-    final encryptedRequest = await security.encrypt(plainRequest);
-    await _writeEndpoint(endpointName, encryptedRequest);
-    final encryptedResponse = await _readEndpointResponse(endpointName);
-    _logPayload(
-      'Encrypted response $endpointName: '
-      '${encryptedResponse.length} bytes ${_hexPreview(encryptedResponse)}',
-    );
-    if (_looksLikeProtoVersionResponse(encryptedResponse)) {
-      throw ProvisionerError(
-        'Endpoint "$endpointName" read proto-ver JSON. Check endpoint UUID '
-        'mapping for the connected firmware. Response: '
-        '${_asciiPreview(encryptedResponse)}',
+    try {
+      final encryptedRequest = await security.encrypt(plainRequest);
+      _ensureActiveOperationCurrent();
+      await _writeEndpoint(endpointName, encryptedRequest);
+      _ensureActiveOperationCurrent();
+      final encryptedResponse = await _readEndpointResponse(endpointName);
+      _ensureActiveOperationCurrent();
+      _logPayload(
+        'Encrypted response $endpointName: '
+        '${encryptedResponse.length} bytes ${_hexPreview(encryptedResponse)}',
       );
+      if (_looksLikeProtoVersionResponse(encryptedResponse)) {
+        throw ProvisionerError(
+          'Endpoint "$endpointName" read proto-ver JSON. Check endpoint UUID '
+          'mapping for the connected firmware.',
+        );
+      }
+      final plainResponse = await security.decrypt(encryptedResponse);
+      _logPayload(
+        'Decrypted response $endpointName: '
+        '${plainResponse.length} bytes ${_hexPreview(plainResponse)}',
+      );
+      return plainResponse;
+    } catch (error) {
+      security.invalidate(error);
+      rethrow;
     }
-    final plainResponse = await security.decrypt(encryptedResponse);
-    _logPayload(
-      'Decrypted response $endpointName: '
-      '${plainResponse.length} bytes ${_hexPreview(plainResponse)}',
-    );
-    return plainResponse;
   }
 
   Future<T> _exchange<T>(
@@ -599,33 +774,37 @@ class EspBleProvisioner {
     String operation,
     T Function(Uint8List response) parse,
   ) async {
-    return _runExclusive(() async {
-      final response = await _sendEncrypted(endpointName, plainRequest);
-      return _parseResponse(operation, response, () => parse(response));
-    });
+    return _runExclusive(
+      () => _exchangeUnlocked(endpointName, plainRequest, operation, parse),
+    );
   }
 
-  T _parseResponse<T>(
+  Future<T> _exchangeUnlocked<T>(
+    String endpointName,
+    Uint8List plainRequest,
     String operation,
-    Uint8List response,
-    T Function() parse,
-  ) {
+    T Function(Uint8List response) parse,
+  ) async {
+    final response = await _sendEncrypted(endpointName, plainRequest);
+    return _parseResponse(operation, () => parse(response));
+  }
+
+  T _parseResponse<T>(String operation, T Function() parse) {
     try {
       return parse();
     } catch (error) {
-      throw ProvisionerError(
-        '$operation response parse failed: $error. '
-        'Response: ${_hexPreview(response)}',
-      );
+      throw ProvisionerError('$operation response parse failed: $error.');
     }
   }
 
   Future<void> _writeEndpoint(String endpointName, Uint8List value) async {
+    _ensureActiveOperationCurrent();
     final endpoint = _endpoint(endpointName);
     _log(
       'Write $endpointName ${endpoint.characteristicUuid}: '
-      '${value.length} bytes ${_hexPreview(value)}',
+      '${value.length} bytes',
     );
+    _logPayload('Write payload $endpointName: ${_hexPreview(value)}');
     await _transport.write(
       _requireDeviceId(),
       endpoint.serviceUuid,
@@ -633,17 +812,24 @@ class EspBleProvisioner {
       value,
       timeout: responseTimeout,
     );
+    _ensureActiveOperationCurrent();
   }
 
-  Future<Uint8List> _readEndpoint(String endpointName, {Duration? timeout}) {
+  Future<Uint8List> _readEndpoint(
+    String endpointName, {
+    Duration? timeout,
+  }) async {
+    _ensureActiveOperationCurrent();
     final endpoint = _endpoint(endpointName);
     _log('Read $endpointName ${endpoint.characteristicUuid}');
-    return _transport.read(
+    final value = await _transport.read(
       _requireDeviceId(),
       endpoint.serviceUuid,
       endpoint.characteristicUuid,
       timeout: timeout,
     );
+    _ensureActiveOperationCurrent();
+    return value;
   }
 
   Future<Uint8List> _readEndpointResponse(String endpointName) async {
@@ -715,6 +901,8 @@ class EspBleProvisioner {
   void _clearConnectionState() {
     _connectionSubscription?.cancel();
     _connectionSubscription = null;
+    security.invalidate();
+    _connectionGeneration++;
     _connected = false;
     _device = null;
     _resolvedServiceUuid = null;
@@ -761,6 +949,47 @@ class EspBleProvisioner {
   }
 
   Future<T> _runExclusive<T>(Future<T> Function() action) {
+    _ensureNotDisposed();
+    final generation = _connectionGeneration;
+    return _enqueue(() async {
+      if (generation != _connectionGeneration) {
+        throw const ProvisionerError(
+          'The operation belongs to an expired BLE connection.',
+        );
+      }
+      _activeConnectionGeneration = generation;
+      try {
+        final result = await action();
+        if (generation != _connectionGeneration) {
+          throw const ProvisionerError(
+            'The BLE connection changed while the operation was running.',
+          );
+        }
+        return result;
+      } finally {
+        _activeConnectionGeneration = null;
+      }
+    });
+  }
+
+  void _ensureActiveOperationCurrent() {
+    final activeGeneration = _activeConnectionGeneration;
+    if (activeGeneration != null && activeGeneration != _connectionGeneration) {
+      throw const ProvisionerError(
+        'The BLE connection changed while the operation was running.',
+      );
+    }
+  }
+
+  void _ensureConnectionGeneration(int generation) {
+    if (generation != _connectionGeneration) {
+      throw const ProvisionerError(
+        'The BLE connection attempt was superseded or cancelled.',
+      );
+    }
+  }
+
+  Future<T> _enqueue<T>(Future<T> Function() action) {
     final completer = Completer<T>();
     _operationTail = _operationTail.catchError((_) {}).then((_) async {
       try {
@@ -770,6 +999,12 @@ class EspBleProvisioner {
       }
     });
     return completer.future;
+  }
+
+  void _ensureNotDisposed() {
+    if (_disposed) {
+      throw const ProvisionerError('EspBleProvisioner has been disposed.');
+    }
   }
 
   Duration _shorterDuration(Duration a, Duration b) => a <= b ? a : b;
@@ -797,14 +1032,5 @@ class EspBleProvisioner {
     if (bytes.isEmpty || bytes.first != 0x7b) return false;
     final text = String.fromCharCodes(bytes.take(64));
     return text.contains('"prov"') || text.contains('"ver"');
-  }
-
-  String _asciiPreview(Uint8List bytes, [int maxBytes = 96]) {
-    final codes = bytes.take(maxBytes).map((byte) {
-      if (byte >= 0x20 && byte <= 0x7e) return byte;
-      return 0x2e;
-    });
-    final preview = String.fromCharCodes(codes);
-    return bytes.length > maxBytes ? '$preview ...' : preview;
   }
 }

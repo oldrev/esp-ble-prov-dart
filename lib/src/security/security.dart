@@ -27,4 +27,16 @@ abstract class Security {
 
   /// Decrypts a provisioning endpoint response payload.
   Future<Uint8List> decrypt(Uint8List data);
+
+  /// Clears connection-specific state before establishing a new session.
+  ///
+  /// Stateless or backwards-compatible custom schemes may keep the default
+  /// no-op implementation.
+  void reset() {}
+
+  /// Marks the current session unusable after an uncertain transport failure.
+  ///
+  /// Stateful schemes should reject subsequent encryption and decryption until
+  /// a new handshake starts.
+  void invalidate([Object? cause]) {}
 }
