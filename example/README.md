@@ -13,9 +13,9 @@ Before running it, configure the target platform permissions required by
 
 The example uses ESP-IDF's current built-in BLE provisioning service UUID,
 1775244d-6b43-439b-877c-060f2d9bed07. The older 0000ffff-0000-1000-8000-00805f9b34fb
-service UUID is not supported by this example. Endpoint characteristic UUIDs are
-derived from the default service UUID automatically. Custom endpoints can still
-be registered in code when your firmware exposes additional protocomm endpoints.
+service UUID is not supported by this example. Endpoint names are read from GATT
+descriptors on Web when available, with default UUID derivation as a fallback.
+Custom endpoints can still be registered explicitly.
 
 Run on Web:
 
@@ -25,4 +25,6 @@ flutter run -d edge
 
 Web Bluetooth requires a secure context. Flutter's local dev server uses
 `localhost`, which is allowed by browsers. For hosted builds, serve the app over
-HTTPS.
+HTTPS. Web Bluetooth does not perform background scans: the example's
+"Authorize Device" button opens the browser device chooser, then connects to the
+single device selected by the user.

@@ -1,23 +1,80 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'proto/protos.dart' as pb;
+/// Authentication mode reported by an ESP Wi-Fi station or scan result.
+enum WiFiAuthMode {
+  open(0),
+  wep(1),
+  wpaPsk(2),
+  wpa2Psk(3),
+  wpaWpa2Psk(4),
+  wpa2Enterprise(5),
+  wpa3Psk(6),
+  wpa2Wpa3Psk(7),
+  unknown(-1);
 
-/// BLE device discovered during ESP provisioning scans.
+  const WiFiAuthMode(this.protocolValue);
+  final int protocolValue;
+
+  static WiFiAuthMode fromProtocolValue(int value) => values.firstWhere(
+    (mode) => mode.protocolValue == value,
+    orElse: () => unknown,
+  );
+}
+
+/// Current ESP Wi-Fi station state.
+enum WiFiStationState {
+  connected(0),
+  connecting(1),
+  disconnected(2),
+  connectionFailed(3),
+  unknown(-1);
+
+  const WiFiStationState(this.protocolValue);
+  final int protocolValue;
+
+  static WiFiStationState fromProtocolValue(int value) => values.firstWhere(
+    (state) => state.protocolValue == value,
+    orElse: () => unknown,
+  );
+}
+
+/// Reason reported when an ESP cannot join the requested network.
+enum WiFiConnectFailureReason {
+  authenticationError(0),
+  networkNotFound(1),
+  unknown(-1);
+
+  const WiFiConnectFailureReason(this.protocolValue);
+  final int protocolValue;
+
+  static WiFiConnectFailureReason fromProtocolValue(int value) =>
+      values.firstWhere(
+        (reason) => reason.protocolValue == value,
+        orElse: () => unknown,
+      );
+}
+
+/// BLE device discovered or authorized for ESP provisioning.
 class EspBleDevice {
-  /// Creates a discovered ESP provisioning device.
   const EspBleDevice({required this.id, this.name});
 
-  /// Platform-specific BLE device identifier used for connecting.
   final String id;
-
-  /// Advertised device name, when available.
   final String? name;
+
+  @override
+  bool operator ==(Object other) =>
+      other is EspBleDevice && other.id == id && other.name == name;
+
+  @override
+  int get hashCode => Object.hash(id, name);
+
+  @override
+  String toString() => 'EspBleDevice(id: $id, name: $name)';
 }
 
 /// Options sent to the ESP device before requesting Wi-Fi scan results.
 class WiFiScanOptions {
-  /// Creates Wi-Fi scan options.
   const WiFiScanOptions({
     this.blocking = true,
     this.passive = false,
@@ -25,113 +82,118 @@ class WiFiScanOptions {
     this.periodMs = 120,
   });
 
-  /// Whether the device should block until the scan completes.
   final bool blocking;
-
-  /// Whether the scan should use passive channel listening.
   final bool passive;
-
-  /// Number of channels scanned in each group.
-  ///
-  /// `0` keeps the ESP-IDF firmware default.
   final int groupChannels;
-
-  /// Delay between grouped channel scans in milliseconds.
   final int periodMs;
+
+  @override
+  bool operator ==(Object other) =>
+      other is WiFiScanOptions &&
+      other.blocking == blocking &&
+      other.passive == passive &&
+      other.groupChannels == groupChannels &&
+      other.periodMs == periodMs;
+
+  @override
+  int get hashCode => Object.hash(blocking, passive, groupChannels, periodMs);
 }
 
 /// Wi-Fi scan progress reported by the ESP device.
 class WiFiScanStatus {
-  /// Creates a Wi-Fi scan status snapshot.
   const WiFiScanStatus({required this.scanFinished, required this.resultCount});
 
-  /// Whether the ESP device has finished the active scan.
   final bool scanFinished;
-
-  /// Number of scan results currently available.
   final int resultCount;
 
-  /// Converts a protobuf scan status response into a public model.
-  factory WiFiScanStatus.fromProto(pb.RespScanStatus status) {
-    return WiFiScanStatus(
-      scanFinished: status.scanFinished,
-      resultCount: status.resultCount,
-    );
-  }
+  @override
+  bool operator ==(Object other) =>
+      other is WiFiScanStatus &&
+      other.scanFinished == scanFinished &&
+      other.resultCount == resultCount;
+
+  @override
+  int get hashCode => Object.hash(scanFinished, resultCount);
 }
 
 /// Wi-Fi credentials and optional access point hints sent to the ESP device.
 class WiFiConfig {
-  /// Creates a Wi-Fi configuration for [ssid].
-  const WiFiConfig({
+  WiFiConfig({
     required this.ssid,
     this.passphrase,
-    this.bssid,
+    List<int>? bssid,
     this.channel = 0,
-  });
+  }) : _bssid = bssid == null ? null : Uint8List.fromList(bssid);
 
-  /// Wi-Fi SSID encoded as UTF-8 for the provisioning protocol.
   final String ssid;
-
-  /// Wi-Fi password. Leave `null` for open networks.
   final String? passphrase;
-
-  /// Optional BSSID to target a specific access point.
-  final Uint8List? bssid;
-
-  /// Optional Wi-Fi channel hint. `0` lets the device choose automatically.
+  final Uint8List? _bssid;
   final int channel;
 
-  /// UTF-8 encoded [ssid].
+  Uint8List? get bssid => _bssid?.asUnmodifiableView();
   Uint8List get ssidBytes => Uint8List.fromList(utf8.encode(ssid));
-
-  /// UTF-8 encoded [passphrase], or an empty byte list when no passphrase is
-  /// set.
   Uint8List get passphraseBytes =>
       Uint8List.fromList(utf8.encode(passphrase ?? ''));
+
+  @override
+  bool operator ==(Object other) =>
+      other is WiFiConfig &&
+      other.ssid == ssid &&
+      other.passphrase == passphrase &&
+      _bytesEqual(other._bssid, _bssid) &&
+      other.channel == channel;
+
+  @override
+  int get hashCode => Object.hash(
+    ssid,
+    passphrase,
+    Object.hashAll(_bssid ?? const <int>[]),
+    channel,
+  );
+
+  @override
+  String toString() =>
+      'WiFiConfig(ssid: $ssid, passphrase: <redacted>, channel: $channel)';
 }
 
 /// Wi-Fi access point returned by the provisioning scan endpoint.
 class WiFiNetwork {
-  /// Creates a scanned Wi-Fi network record.
-  const WiFiNetwork({
+  WiFiNetwork({
     required this.ssid,
     required this.channel,
     required this.rssi,
-    required this.bssid,
+    required List<int> bssid,
     required this.auth,
-  });
+  }) : _bssid = Uint8List.fromList(bssid);
 
-  /// Access point SSID decoded as UTF-8.
   final String ssid;
-
-  /// Wi-Fi channel used by the access point.
   final int channel;
-
-  /// Received signal strength indicator in dBm.
   final int rssi;
+  final Uint8List _bssid;
+  final WiFiAuthMode auth;
 
-  /// Access point BSSID.
-  final Uint8List bssid;
+  Uint8List get bssid => _bssid.asUnmodifiableView();
 
-  /// Authentication mode reported by the ESP device.
-  final pb.WifiAuthMode auth;
+  @override
+  bool operator ==(Object other) =>
+      other is WiFiNetwork &&
+      other.ssid == ssid &&
+      other.channel == channel &&
+      other.rssi == rssi &&
+      _bytesEqual(other._bssid, _bssid) &&
+      other.auth == auth;
 
-  /// Converts a protobuf scan result into a public model.
-  factory WiFiNetwork.fromProto(pb.WiFiScanResult result) {
-    return WiFiNetwork(
-      ssid: utf8.decode(result.ssid, allowMalformed: true),
-      channel: result.channel,
-      rssi: result.rssi,
-      bssid: Uint8List.fromList(result.bssid),
-      auth: result.auth,
-    );
-  }
+  @override
+  int get hashCode =>
+      Object.hash(ssid, channel, rssi, Object.hashAll(_bssid), auth);
+
+  @override
+  String toString() =>
+      'WiFiNetwork(ssid: $ssid, channel: $channel, rssi: $rssi, auth: $auth)';
 }
 
 /// Current Wi-Fi station status reported by the ESP device.
 class WiFiStatus {
-  /// Creates a Wi-Fi status snapshot.
   const WiFiStatus({
     required this.state,
     this.failReason,
@@ -139,69 +201,61 @@ class WiFiStatus {
     this.attemptsRemaining,
   });
 
-  /// ESP station state.
-  final pb.WifiStationState state;
-
-  /// Failure reason when [state] indicates a connection failure.
-  final pb.WifiConnectFailedReason? failReason;
-
-  /// Connected network details when [state] is connected.
+  final WiFiStationState state;
+  final WiFiConnectFailureReason? failReason;
   final WiFiConnectedState? connected;
-
-  /// Remaining connection attempts after a failed attempt, when reported.
   final int? attemptsRemaining;
 
-  /// Converts a protobuf status response into a public model.
-  factory WiFiStatus.fromProto(pb.RespGetStatus status) {
-    return WiFiStatus(
-      state: status.staState,
-      failReason: status.hasFailReason() ? status.failReason : null,
-      connected:
-          status.hasConnected()
-              ? WiFiConnectedState.fromProto(status.connected)
-              : null,
-      attemptsRemaining:
-          status.hasAttemptFailed()
-              ? status.attemptFailed.attemptsRemaining
-              : null,
-    );
-  }
+  @override
+  bool operator ==(Object other) =>
+      other is WiFiStatus &&
+      other.state == state &&
+      other.failReason == failReason &&
+      other.connected == connected &&
+      other.attemptsRemaining == attemptsRemaining;
+
+  @override
+  int get hashCode =>
+      Object.hash(state, failReason, connected, attemptsRemaining);
 }
 
 /// Details reported when the ESP station is connected to Wi-Fi.
 class WiFiConnectedState {
-  /// Creates a connected Wi-Fi state snapshot.
-  const WiFiConnectedState({
+  WiFiConnectedState({
     required this.ip4Addr,
     required this.authMode,
     required this.ssid,
-    required this.bssid,
+    required List<int> bssid,
     required this.channel,
-  });
+  }) : _bssid = Uint8List.fromList(bssid);
 
-  /// IPv4 address assigned to the ESP device.
   final String ip4Addr;
-
-  /// Authentication mode of the connected access point.
-  final pb.WifiAuthMode authMode;
-
-  /// Connected SSID decoded as UTF-8.
+  final WiFiAuthMode authMode;
   final String ssid;
-
-  /// Connected access point BSSID.
-  final Uint8List bssid;
-
-  /// Connected Wi-Fi channel.
+  final Uint8List _bssid;
   final int channel;
 
-  /// Converts a protobuf connected-state message into a public model.
-  factory WiFiConnectedState.fromProto(pb.WifiConnectedState state) {
-    return WiFiConnectedState(
-      ip4Addr: state.ip4Addr,
-      authMode: state.authMode,
-      ssid: utf8.decode(state.ssid, allowMalformed: true),
-      bssid: Uint8List.fromList(state.bssid),
-      channel: state.channel,
-    );
+  Uint8List get bssid => _bssid.asUnmodifiableView();
+
+  @override
+  bool operator ==(Object other) =>
+      other is WiFiConnectedState &&
+      other.ip4Addr == ip4Addr &&
+      other.authMode == authMode &&
+      other.ssid == ssid &&
+      _bytesEqual(other._bssid, _bssid) &&
+      other.channel == channel;
+
+  @override
+  int get hashCode =>
+      Object.hash(ip4Addr, authMode, ssid, Object.hashAll(_bssid), channel);
+}
+
+bool _bytesEqual(List<int>? a, List<int>? b) {
+  if (identical(a, b)) return true;
+  if (a == null || b == null || a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
   }
+  return true;
 }

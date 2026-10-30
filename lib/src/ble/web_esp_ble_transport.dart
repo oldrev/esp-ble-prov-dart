@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:js_interop';
 import 'dart:js_interop_unsafe';
 import 'dart:typed_data';
@@ -47,9 +48,20 @@ extension type _BluetoothRemoteGATTCharacteristic(JSObject _)
   external JSPromise<JSAny?> writeValue(JSArrayBuffer value);
   external JSPromise<JSAny?> writeValueWithResponse(JSArrayBuffer value);
   external JSPromise<JSAny?> writeValueWithoutResponse(JSArrayBuffer value);
+  external JSPromise<JSArray<_BluetoothRemoteGATTDescriptor>> getDescriptors();
 }
 
-class WebEspBleTransport implements EspBleTransport, DisposableEspBleTransport {
+extension type _BluetoothRemoteGATTDescriptor(JSObject _) implements JSObject {
+  external String get uuid;
+  external JSPromise<JSDataView> readValue();
+}
+
+class WebEspBleTransport
+    implements
+        EspBleTransport,
+        DisposableEspBleTransport,
+        BleDeviceChooserTransport,
+        BleEndpointMappingTransport {
   WebEspBleTransport({required this.serviceUuid});
 
   final String serviceUuid;
@@ -59,6 +71,7 @@ class WebEspBleTransport implements EspBleTransport, DisposableEspBleTransport {
   final Map<String, _BluetoothRemoteGATTCharacteristic> _characteristics = {};
   final Map<String, StreamController<bool>> _connectionControllers = {};
   final Map<String, JSFunction> _disconnectListeners = {};
+  bool _disposed = false;
 
   @override
   Stream<BleDevice> get scanStream => _scanController.stream;
@@ -80,6 +93,7 @@ class WebEspBleTransport implements EspBleTransport, DisposableEspBleTransport {
     ScanFilter? scanFilter,
     PlatformConfig? platformConfig,
   }) async {
+    _ensureNotDisposed();
     final bluetooth = _bluetooth;
     if (bluetooth == null) {
       throw UniversalBleException(
@@ -109,6 +123,7 @@ class WebEspBleTransport implements EspBleTransport, DisposableEspBleTransport {
 
   @override
   Future<void> connect(String deviceId, {Duration? timeout}) async {
+    _ensureNotDisposed();
     final device = _requireDevice(deviceId);
     final gatt = device.gatt;
     if (gatt == null) {
@@ -159,11 +174,66 @@ class WebEspBleTransport implements EspBleTransport, DisposableEspBleTransport {
     final webCharacteristics =
         (await service.getCharacteristics().toDart).toDart;
     for (final characteristic in webCharacteristics) {
+      final descriptors = <BleDescriptor>[];
+      if (withDescriptors) {
+        try {
+          final webDescriptors =
+              (await characteristic.getDescriptors().toDart).toDart;
+          descriptors.addAll(
+            webDescriptors.map((descriptor) => BleDescriptor(descriptor.uuid)),
+          );
+        } catch (_) {
+          // Descriptor discovery is optional. Endpoint resolution falls back
+          // to UUID derivation when the browser/device does not expose it.
+        }
+      }
       characteristics.add(
-        BleCharacteristic(characteristic.uuid, const [], const []),
+        BleCharacteristic(characteristic.uuid, const [], descriptors),
       );
     }
     return [BleService(service.uuid, characteristics)];
+  }
+
+  @override
+  Future<Map<String, String>> readEndpointMappings(
+    String deviceId,
+    String requestedServiceUuid,
+  ) async {
+    if (!BleUuidParser.compareStrings(requestedServiceUuid, serviceUuid)) {
+      return const {};
+    }
+    final service = await _getService(deviceId);
+    final characteristics = (await service.getCharacteristics().toDart).toDart;
+    final mappings = <String, String>{};
+    for (final characteristic in characteristics) {
+      try {
+        final descriptors =
+            (await characteristic.getDescriptors().toDart).toDart;
+        for (final descriptor in descriptors) {
+          if (!BleUuidParser.compareStrings(
+            descriptor.uuid,
+            '00002901-0000-1000-8000-00805f9b34fb',
+          )) {
+            continue;
+          }
+          final data = (await descriptor.readValue().toDart).toDart;
+          final bytes = Uint8List.view(
+            data.buffer,
+            data.offsetInBytes,
+            data.lengthInBytes,
+          );
+          final endpointName =
+              utf8.decode(bytes).replaceAll('\u0000', '').trim();
+          if (endpointName.isNotEmpty) {
+            mappings[endpointName] = characteristic.uuid;
+          }
+        }
+      } catch (_) {
+        // Ignore one inaccessible/malformed descriptor and continue resolving
+        // the remaining characteristics.
+      }
+    }
+    return mappings;
   }
 
   @override
@@ -227,8 +297,10 @@ class WebEspBleTransport implements EspBleTransport, DisposableEspBleTransport {
 
   void _registerDisconnectListener(_BluetoothDevice device) {
     if (_disconnectListeners.containsKey(device.id)) return;
-    final listener =
+    late final JSFunction listener;
+    listener =
         ((JSAny? _) {
+          device.removeEventListener('gattserverdisconnected', listener);
           final controller = _connectionControllers[device.id];
           if (controller != null && !controller.isClosed) {
             controller.add(false);
@@ -258,6 +330,8 @@ class WebEspBleTransport implements EspBleTransport, DisposableEspBleTransport {
 
   @override
   Future<void> dispose() async {
+    if (_disposed) return;
+    _disposed = true;
     for (final deviceId in _devices.keys.toList(growable: false)) {
       _removeDisconnectListener(deviceId);
       _devices[deviceId]?.gatt?.disconnect();
@@ -268,6 +342,10 @@ class WebEspBleTransport implements EspBleTransport, DisposableEspBleTransport {
     }
     _connectionControllers.clear();
     await _scanController.close();
+  }
+
+  void _ensureNotDisposed() {
+    if (_disposed) throw StateError('WebEspBleTransport has been disposed.');
   }
 
   Future<_BluetoothRemoteGATTService> _getService(String deviceId) async {

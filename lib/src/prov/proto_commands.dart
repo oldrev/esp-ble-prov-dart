@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import '../models.dart';
@@ -158,7 +159,11 @@ WiFiScanStatus scanStatusResponse(Uint8List response) {
     throw const ProvisionerError('Missing Wi-Fi scan status response.');
   }
   _ensureStatus(payload.status, 'Get scan status');
-  return WiFiScanStatus.fromProto(payload.respScanStatus);
+  final status = payload.respScanStatus;
+  return WiFiScanStatus(
+    scanFinished: status.scanFinished,
+    resultCount: status.resultCount,
+  );
 }
 
 Uint8List scanResultRequest({required int startIndex, required int count}) {
@@ -183,7 +188,17 @@ List<WiFiNetwork> scanResultResponse(Uint8List response) {
     throw const ProvisionerError('Missing Wi-Fi scan result response.');
   }
   _ensureStatus(payload.status, 'Get scan results');
-  return payload.respScanResult.entries.map(WiFiNetwork.fromProto).toList();
+  return payload.respScanResult.entries
+      .map(
+        (entry) => WiFiNetwork(
+          ssid: utf8.decode(entry.ssid, allowMalformed: true),
+          channel: entry.channel,
+          rssi: entry.rssi,
+          bssid: entry.bssid,
+          auth: WiFiAuthMode.fromProtocolValue(entry.auth.value),
+        ),
+      )
+      .toList();
 }
 
 Uint8List configGetStatusRequest() {
@@ -206,7 +221,33 @@ WiFiStatus configGetStatusResponse(Uint8List response) {
     throw const ProvisionerError('Missing Wi-Fi status response.');
   }
   _ensureStatus(payload.respGetStatus.status, 'Get Wi-Fi status');
-  return WiFiStatus.fromProto(payload.respGetStatus);
+  final status = payload.respGetStatus;
+  final connected = status.hasConnected() ? status.connected : null;
+  return WiFiStatus(
+    state: WiFiStationState.fromProtocolValue(status.staState.value),
+    failReason:
+        status.hasFailReason()
+            ? WiFiConnectFailureReason.fromProtocolValue(
+              status.failReason.value,
+            )
+            : null,
+    connected:
+        connected == null
+            ? null
+            : WiFiConnectedState(
+              ip4Addr: connected.ip4Addr,
+              authMode: WiFiAuthMode.fromProtocolValue(
+                connected.authMode.value,
+              ),
+              ssid: utf8.decode(connected.ssid, allowMalformed: true),
+              bssid: connected.bssid,
+              channel: connected.channel,
+            ),
+    attemptsRemaining:
+        status.hasAttemptFailed()
+            ? status.attemptFailed.attemptsRemaining
+            : null,
+  );
 }
 
 Uint8List configSetConfigRequest(WiFiConfig config) {

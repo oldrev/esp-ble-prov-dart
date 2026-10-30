@@ -55,6 +55,19 @@ abstract class DisposableEspBleTransport {
   Future<void> dispose();
 }
 
+/// Marker for transports that use a user-facing chooser instead of a timed
+/// background BLE scan (for example Web Bluetooth `requestDevice()`).
+abstract class BleDeviceChooserTransport {}
+
+/// Optional capability for reading ESP protocomm endpoint names from GATT
+/// characteristic user-description descriptors.
+abstract class BleEndpointMappingTransport {
+  Future<Map<String, String>> readEndpointMappings(
+    String deviceId,
+    String serviceUuid,
+  );
+}
+
 class UniversalBleTransport implements EspBleTransport {
   const UniversalBleTransport();
 

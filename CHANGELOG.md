@@ -1,4 +1,4 @@
-## 0.5.1
+## 0.6.0
 
 - Fixed Web Bluetooth writes for `Uint8List` views with non-zero offsets.
 - Serialized complete scan and credential provisioning workflows atomically.
@@ -7,6 +7,16 @@
 - Added atomic custom endpoint request/response exchange API.
 - Removed payload bytes from default logs and error messages.
 - Improved Web Bluetooth cache, listener, and stream cleanup.
+- Added descriptor-first endpoint mapping with explicit and derived fallbacks.
+- Added `authorizeDevice()` and explicit Web Bluetooth chooser semantics.
+- Added structured provisioning error codes with cause and operation context.
+- Added cooperative cancellation for discovery, connection, scan, and credential workflows.
+- Replaced public generated protobuf enums with stable package-owned Wi-Fi enums.
+- Added defensive byte-array models, value equality, and redacted credential output.
+- Added validated `ProvisioningTimeouts` and monotonic polling deadlines.
+- Made Web transport disposal idempotent and remove disconnect listeners eagerly.
+- Expanded hardware-independent tests to cover protocol validation, boundaries,
+  deterministic concurrency, fault injection, and Web chooser lifecycle.
 
 ## 0.5.0
 

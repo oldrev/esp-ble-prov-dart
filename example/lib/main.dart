@@ -1,4 +1,5 @@
 import 'package:esp_ble_prov_dart/esp_ble_prov_dart.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:universal_ble/universal_ble.dart';
 
@@ -53,7 +54,7 @@ class _ProvisioningPageState extends State<ProvisioningPage> {
     _devicePrefix.dispose();
     _pop.dispose();
     _password.dispose();
-    _provisioner?.disconnect();
+    _provisioner?.dispose();
     super.dispose();
   }
 
@@ -83,9 +84,18 @@ class _ProvisioningPageState extends State<ProvisioningPage> {
   }
 
   Future<void> _scanDevices() async {
-    await _provisioner?.disconnect();
+    final previousProvisioner = _provisioner;
     final provisioner = _newProvisioner();
-    final devices = await provisioner.scanDevices();
+    late final List<EspBleDevice> devices;
+    if (kIsWeb) {
+      // requestDevice() must be the first asynchronous browser operation after
+      // the button click, otherwise transient user activation may be lost.
+      devices = <EspBleDevice>[await provisioner.authorizeDevice()];
+      await previousProvisioner?.dispose();
+    } else {
+      await previousProvisioner?.dispose();
+      devices = await provisioner.scanDevices();
+    }
     setState(() {
       _provisioner = provisioner;
       _device = null;
@@ -97,8 +107,10 @@ class _ProvisioningPageState extends State<ProvisioningPage> {
 
   Future<void> _selectDevice(EspBleDevice device) async {
     await _run('Prepare ${device.name ?? device.id}', () async {
-      await _provisioner?.disconnect();
-      final provisioner = _newProvisioner();
+      final provisioner = kIsWeb
+          ? _requireProvisionerInstance()
+          : _newProvisioner();
+      if (!kIsWeb) await _provisioner?.dispose();
       try {
         await provisioner.connect(device: device);
         await provisioner.establishSession();
@@ -110,7 +122,7 @@ class _ProvisioningPageState extends State<ProvisioningPage> {
         });
         _log('Found ${networks.length} Wi-Fi network(s)');
       } catch (_) {
-        await provisioner.disconnect();
+        await provisioner.dispose();
         setState(() {
           if (identical(_provisioner, provisioner)) {
             _provisioner = null;
@@ -166,7 +178,7 @@ class _ProvisioningPageState extends State<ProvisioningPage> {
   }
 
   Future<void> _disconnect() async {
-    await _provisioner?.disconnect();
+    await _provisioner?.dispose();
     setState(() {
       _provisioner = null;
       _device = null;
@@ -188,6 +200,14 @@ class _ProvisioningPageState extends State<ProvisioningPage> {
     final provisioner = _provisioner;
     if (provisioner == null || !provisioner.isConnected) {
       throw const ProvisionerError('Select a provisioning device first.');
+    }
+    return provisioner;
+  }
+
+  EspBleProvisioner _requireProvisionerInstance() {
+    final provisioner = _provisioner;
+    if (provisioner == null) {
+      throw const ProvisionerError('Authorize a provisioning device first.');
     }
     return provisioner;
   }
@@ -320,7 +340,7 @@ class _DevicePane extends StatelessWidget {
               FilledButton.icon(
                 onPressed: busy ? null : onScanDevices,
                 icon: const Icon(Icons.bluetooth_searching),
-                label: const Text('Scan Devices'),
+                label: Text(kIsWeb ? 'Authorize Device' : 'Scan Devices'),
               ),
               if (busy) ...[
                 const SizedBox(height: 12),

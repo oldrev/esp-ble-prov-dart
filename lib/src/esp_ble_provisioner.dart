@@ -8,8 +8,8 @@ import 'ble/platform_transport.dart'
 import 'endpoint_uuids.dart';
 import 'models.dart';
 import 'prov/proto_commands.dart' as commands;
-import 'proto/protos.dart' as pb;
 import 'provisioner_error.dart';
+import 'provisioning_options.dart';
 import 'security/security.dart';
 import 'security/security0.dart';
 
@@ -46,19 +46,36 @@ class EspBleProvisioner {
     EspBleTransport? transport,
     this.requestAndroidFineLocation = false,
     this.mtu = 517,
-    this.responseDelay = const Duration(milliseconds: 200),
-    this.responseTimeout = const Duration(seconds: 15),
-    this.readRetryInterval = const Duration(milliseconds: 100),
+    ProvisioningTimeouts timeouts = const ProvisioningTimeouts(),
+    Duration? responseDelay,
+    Duration? responseTimeout,
+    Duration? readRetryInterval,
     this.logPayloads = false,
     void Function(String message)? onLog,
   }) : security = security ?? const Security0(),
+       responseDelay = responseDelay ?? timeouts.responseDelay,
+       responseTimeout = responseTimeout ?? timeouts.responseTimeout,
+       readRetryInterval = readRetryInterval ?? timeouts.readRetryInterval,
        _transport = transport ?? createPlatformTransport(serviceUuid),
        _onLog = onLog,
        _explicitEndpointNames = endpointUuids.keys.toSet(),
        _endpointUuids = {
          ...deriveEspProvisioningEndpointUuids(serviceUuid),
          ...endpointUuids,
-       };
+       },
+       _endpointUuidSources = {
+         for (final name
+             in deriveEspProvisioningEndpointUuids(serviceUuid).keys)
+           name: EndpointUuidSource.derived,
+         for (final name in endpointUuids.keys)
+           name: EndpointUuidSource.explicit,
+       } {
+    ProvisioningTimeouts(
+      responseDelay: this.responseDelay,
+      responseTimeout: this.responseTimeout,
+      readRetryInterval: this.readRetryInterval,
+    ).validate();
+  }
 
   /// BLE service UUID advertised by the ESP provisioning service.
   final String serviceUuid;
@@ -104,10 +121,12 @@ class EspBleProvisioner {
   final void Function(String message)? _onLog;
   final Set<String> _explicitEndpointNames;
   final Map<String, String> _endpointUuids;
+  final Map<String, EndpointUuidSource> _endpointUuidSources;
   String? _resolvedServiceUuid;
   Set<String>? _discoveredCharacteristicUuids;
   StreamSubscription<bool>? _connectionSubscription;
   Future<void> _operationTail = Future<void>.value();
+  int _queuedOperationCount = 0;
   int _connectionGeneration = 0;
   int? _activeConnectionGeneration;
   bool _disposed = false;
@@ -124,13 +143,31 @@ class EspBleProvisioner {
   /// Current endpoint-to-characteristic UUID mapping.
   Map<String, String> get endpointUuids => Map.unmodifiable(_endpointUuids);
 
+  /// How each current endpoint UUID was resolved.
+  Map<String, EndpointUuidSource> get endpointUuidSources =>
+      Map.unmodifiable(_endpointUuidSources);
+
+  /// Whether this platform uses a user-facing chooser instead of background
+  /// BLE discovery. This is `true` for Web Bluetooth.
+  bool get usesDeviceChooser =>
+      kIsWeb || _transport is BleDeviceChooserTransport;
+
+  /// Whether the active transport can read endpoint names from GATT
+  /// descriptors. The built-in Web transport supports this; universal_ble
+  /// 1.x does not expose descriptor values on native platforms.
+  bool get supportsDescriptorEndpointDiscovery =>
+      _transport is BleEndpointMappingTransport;
+
   /// Scans for ESP provisioning devices matching [deviceNamePrefix].
   ///
   /// The scan runs for [duration] and returns de-duplicated devices by BLE id.
-  /// Pass [serviceUuids] to add platform scan filters.
+  /// Pass [serviceUuids] to add platform scan filters. On chooser-based
+  /// platforms such as Web Bluetooth, this opens the browser device picker and
+  /// returns zero or one authorized device; it is not a background scan.
   Future<List<EspBleDevice>> scanDevices({
     Duration duration = const Duration(seconds: 8),
     List<String>? serviceUuids,
+    ProvisioningCancellationToken? cancellationToken,
   }) {
     _ensureNotDisposed();
     if (duration <= Duration.zero) {
@@ -140,16 +177,28 @@ class EspBleProvisioner {
         'Must be greater than 0.',
       );
     }
+    if (usesDeviceChooser) {
+      return authorizeDevice(
+        serviceUuids: serviceUuids,
+        cancellationToken: cancellationToken,
+      ).then((device) => <EspBleDevice>[device]);
+    }
     return _enqueue(
-      () => _scanDevices(duration: duration, serviceUuids: serviceUuids),
+      () => _scanDevices(
+        duration: duration,
+        serviceUuids: serviceUuids,
+        cancellationToken: cancellationToken,
+      ),
     );
   }
 
   Future<List<EspBleDevice>> _scanDevices({
     required Duration duration,
     List<String>? serviceUuids,
+    ProvisioningCancellationToken? cancellationToken,
   }) async {
     _ensureNotDisposed();
+    cancellationToken?.throwIfCancelled('scanDevices');
     final devices = <String, EspBleDevice>{};
     final subscription = _transport.scanStream.listen((device) {
       final name = device.name ?? device.rawName;
@@ -158,9 +207,11 @@ class EspBleProvisioner {
     });
 
     try {
-      await _transport.requestPermissions(
-        withAndroidFineLocation: requestAndroidFineLocation,
-      );
+      if (!usesDeviceChooser) {
+        await _transport.requestPermissions(
+          withAndroidFineLocation: requestAndroidFineLocation,
+        );
+      }
       await _transport.startScan(
         scanFilter: ScanFilter(
           withNamePrefix: [deviceNamePrefix],
@@ -175,7 +226,9 @@ class EspBleProvisioner {
       );
       // Web Bluetooth's requestDevice() already waits for a user selection and
       // emits exactly one device; it is not a timed discovery scan.
-      if (!kIsWeb) await Future<void>.delayed(duration);
+      if (!usesDeviceChooser) {
+        await _delay(duration, cancellationToken, 'scanDevices');
+      }
     } finally {
       try {
         await _transport.stopScan();
@@ -196,10 +249,17 @@ class EspBleProvisioner {
     EspBleDevice? device,
     Duration scanDuration = const Duration(seconds: 8),
     Duration connectionTimeout = const Duration(seconds: 60),
+    ProvisioningCancellationToken? cancellationToken,
   }) {
     _ensureNotDisposed();
     if (isConnected) {
       throw const ProvisionerError('Already connected. Disconnect first.');
+    }
+    if (usesDeviceChooser && device == null) {
+      throw const ProvisionerError(
+        'Web Bluetooth cannot scan in the background. Call authorizeDevice() '
+        'from a user gesture, then pass the returned device to connect().',
+      );
     }
     final generation = ++_connectionGeneration;
     security.reset();
@@ -209,8 +269,55 @@ class EspBleProvisioner {
         scanDuration: scanDuration,
         connectionTimeout: connectionTimeout,
         generation: generation,
+        cancellationToken: cancellationToken,
       ),
     );
+  }
+
+  /// Opens the platform device chooser and returns the device authorized by the
+  /// user. Web Bluetooth requires this call to originate from a user gesture.
+  ///
+  /// Native BLE platforms support background discovery through [scanDevices]
+  /// and therefore reject this chooser-specific API.
+  Future<EspBleDevice> authorizeDevice({
+    List<String>? serviceUuids,
+    ProvisioningCancellationToken? cancellationToken,
+  }) {
+    _ensureNotDisposed();
+    if (!usesDeviceChooser) {
+      throw const ProvisionerError(
+        'authorizeDevice() is only available on chooser-based platforms. '
+        'Use scanDevices() on this platform.',
+        code: ProvisionerErrorCode.unsupported,
+      );
+    }
+    if (_queuedOperationCount != 0) {
+      throw const ProvisionerError(
+        'The Web Bluetooth device chooser must be opened while the provisioner '
+        'is idle.',
+      );
+    }
+    return _runImmediate(
+      () => _authorizeDevice(
+        serviceUuids: serviceUuids,
+        cancellationToken: cancellationToken,
+      ),
+    );
+  }
+
+  Future<EspBleDevice> _authorizeDevice({
+    List<String>? serviceUuids,
+    ProvisioningCancellationToken? cancellationToken,
+  }) async {
+    final devices = await _scanDevices(
+      duration: const Duration(milliseconds: 1),
+      serviceUuids: serviceUuids,
+      cancellationToken: cancellationToken,
+    );
+    if (devices.isEmpty) {
+      throw const ProvisionerError('No BLE device was authorized.');
+    }
+    return devices.first;
   }
 
   Future<EspBleDevice> _connect({
@@ -218,15 +325,24 @@ class EspBleProvisioner {
     required Duration scanDuration,
     required Duration connectionTimeout,
     required int generation,
+    ProvisioningCancellationToken? cancellationToken,
   }) async {
     _ensureNotDisposed();
+    cancellationToken?.throwIfCancelled('connect');
     _ensureConnectionGeneration(generation);
     final target =
-        device ?? await _findFirstDevice(scanDuration, useInternalScan: true);
+        device ??
+        await _findFirstDevice(
+          scanDuration,
+          useInternalScan: true,
+          cancellationToken: cancellationToken,
+        );
     _ensureConnectionGeneration(generation);
+    cancellationToken?.throwIfCancelled('connect');
     await _transport.stopScan();
     try {
       await _transport.connect(target.id, timeout: connectionTimeout);
+      cancellationToken?.throwIfCancelled('connect');
       _ensureConnectionGeneration(generation);
       _device = target;
       _connected = true;
@@ -312,8 +428,16 @@ class EspBleProvisioner {
       }
     } catch (error) {
       security.invalidate(error);
-      if (error is ProvisionerError) rethrow;
-      throw ProvisionerError('Security session establishment failed: $error.');
+      if (error is ProvisionerError &&
+          error.code != ProvisionerErrorCode.unknown) {
+        rethrow;
+      }
+      throw ProvisionerError(
+        'Security session establishment failed: $error.',
+        code: ProvisionerErrorCode.securityFailed,
+        operation: 'establishSession',
+        cause: error,
+      );
     }
   }
 
@@ -387,6 +511,7 @@ class EspBleProvisioner {
     Duration timeout = const Duration(seconds: 45),
     Duration pollInterval = const Duration(seconds: 1),
     int pageSize = 4,
+    ProvisioningCancellationToken? cancellationToken,
   }) {
     if (pageSize <= 0) {
       throw ArgumentError.value(
@@ -400,12 +525,14 @@ class EspBleProvisioner {
         'Non-blocking Wi-Fi scan is not implemented.',
       );
     }
+    _validatePolling(timeout, pollInterval, 'scan');
     return _runExclusive(
       () => _scanUnlocked(
         options: options,
         timeout: timeout,
         pollInterval: pollInterval,
         pageSize: pageSize,
+        cancellationToken: cancellationToken,
       ),
     );
   }
@@ -415,15 +542,18 @@ class EspBleProvisioner {
     required Duration timeout,
     required Duration pollInterval,
     required int pageSize,
+    ProvisioningCancellationToken? cancellationToken,
   }) async {
+    cancellationToken?.throwIfCancelled('scan');
     await _exchangeUnlocked(
       provScanEndpoint,
       commands.scanStartRequest(options),
       'Start Wi-Fi scan',
       commands.scanStartResponse,
     );
-    final deadline = DateTime.now().add(timeout);
-    while (DateTime.now().isBefore(deadline)) {
+    final elapsed = Stopwatch()..start();
+    while (elapsed.elapsed < timeout) {
+      cancellationToken?.throwIfCancelled('scan');
       final status = await _exchangeUnlocked(
         provScanEndpoint,
         commands.scanStatusRequest(),
@@ -446,10 +576,12 @@ class EspBleProvisioner {
         }
         return networks;
       }
-      await Future<void>.delayed(pollInterval);
+      await _delay(pollInterval, cancellationToken, 'scan');
     }
     throw ProvisionerError(
       'Wi-Fi scan timed out after ${timeout.inMilliseconds}ms.',
+      code: ProvisionerErrorCode.timeout,
+      operation: 'scan',
     );
   }
 
@@ -506,11 +638,14 @@ class EspBleProvisioner {
   Future<WiFiStatus> waitForWiFiStatus({
     Duration timeout = const Duration(seconds: 60),
     Duration pollInterval = const Duration(seconds: 1),
+    ProvisioningCancellationToken? cancellationToken,
   }) {
+    _validatePolling(timeout, pollInterval, 'waitForWiFiStatus');
     return _runExclusive(
       () => _waitForWiFiStatusUnlocked(
         timeout: timeout,
         pollInterval: pollInterval,
+        cancellationToken: cancellationToken,
       ),
     );
   }
@@ -518,26 +653,32 @@ class EspBleProvisioner {
   Future<WiFiStatus> _waitForWiFiStatusUnlocked({
     required Duration timeout,
     required Duration pollInterval,
+    ProvisioningCancellationToken? cancellationToken,
   }) async {
-    final deadline = DateTime.now().add(timeout);
-    while (DateTime.now().isBefore(deadline)) {
+    final elapsed = Stopwatch()..start();
+    while (elapsed.elapsed < timeout) {
+      cancellationToken?.throwIfCancelled('waitForWiFiStatus');
       final status = await _exchangeUnlocked(
         provConfigEndpoint,
         commands.configGetStatusRequest(),
         'Get Wi-Fi status',
         commands.configGetStatusResponse,
       );
-      if (status.state == pb.WifiStationState.Connected) return status;
-      if (status.state == pb.WifiStationState.ConnectionFailed ||
+      if (status.state == WiFiStationState.connected) return status;
+      if (status.state == WiFiStationState.connectionFailed ||
           status.attemptsRemaining == 0) {
         throw ProvisionerError(
           'Wi-Fi connection failed: ${status.failReason?.name ?? 'no attempts remaining'}',
+          code: ProvisionerErrorCode.wifiConnectionFailed,
+          operation: 'waitForWiFiStatus',
         );
       }
-      await Future<void>.delayed(pollInterval);
+      await _delay(pollInterval, cancellationToken, 'waitForWiFiStatus');
     }
     throw ProvisionerError(
       'Wi-Fi connection timed out after ${timeout.inMilliseconds}ms.',
+      code: ProvisionerErrorCode.timeout,
+      operation: 'waitForWiFiStatus',
     );
   }
 
@@ -545,14 +686,18 @@ class EspBleProvisioner {
   Future<WiFiStatus> sendCredentials(
     WiFiConfig config, {
     Duration timeout = const Duration(seconds: 60),
+    ProvisioningCancellationToken? cancellationToken,
   }) {
+    _validatePolling(timeout, const Duration(seconds: 1), 'sendCredentials');
     return _runExclusive(() async {
+      cancellationToken?.throwIfCancelled('sendCredentials');
       await _exchangeUnlocked(
         provConfigEndpoint,
         commands.configSetConfigRequest(config),
         'Set Wi-Fi config',
         commands.configSetConfigResponse,
       );
+      cancellationToken?.throwIfCancelled('sendCredentials');
       await _exchangeUnlocked(
         provConfigEndpoint,
         commands.configApplyConfigRequest(),
@@ -562,6 +707,7 @@ class EspBleProvisioner {
       return _waitForWiFiStatusUnlocked(
         timeout: timeout,
         pollInterval: const Duration(seconds: 1),
+        cancellationToken: cancellationToken,
       );
     });
   }
@@ -615,7 +761,16 @@ class EspBleProvisioner {
 
   /// Registers or overrides an endpoint characteristic UUID by name.
   void registerEndpoint(String endpointName, String characteristicUuid) {
+    if (endpointName.trim().isEmpty) {
+      throw ArgumentError.value(
+        endpointName,
+        'endpointName',
+        'Must not be empty.',
+      );
+    }
+    _explicitEndpointNames.add(endpointName);
     _endpointUuids[endpointName] = characteristicUuid;
+    _endpointUuidSources[endpointName] = EndpointUuidSource.explicit;
   }
 
   /// Registers an ESP-IDF custom endpoint by sequential [index].
@@ -632,14 +787,23 @@ class EspBleProvisioner {
   Future<EspBleDevice> _findFirstDevice(
     Duration scanDuration, {
     bool useInternalScan = false,
+    ProvisioningCancellationToken? cancellationToken,
   }) async {
     final devices =
         useInternalScan
-            ? await _scanDevices(duration: scanDuration)
-            : await scanDevices(duration: scanDuration);
+            ? await _scanDevices(
+              duration: scanDuration,
+              cancellationToken: cancellationToken,
+            )
+            : await scanDevices(
+              duration: scanDuration,
+              cancellationToken: cancellationToken,
+            );
     if (devices.isEmpty) {
       throw ProvisionerError(
         'No ESP provisioning device found with prefix $deviceNamePrefix.',
+        code: ProvisionerErrorCode.deviceNotFound,
+        operation: 'scanDevices',
       );
     }
     return devices.first;
@@ -670,10 +834,17 @@ class EspBleProvisioner {
     }
     _resolvedServiceUuid = service.uuid;
 
+    _endpointUuids.removeWhere(
+      (name, _) => _endpointUuidSources[name] != EndpointUuidSource.explicit,
+    );
+    _endpointUuidSources.removeWhere(
+      (_, source) => source != EndpointUuidSource.explicit,
+    );
     final derived = deriveEspProvisioningEndpointUuids(service.uuid);
     for (final entry in derived.entries) {
       if (_explicitEndpointNames.contains(entry.key)) continue;
       _endpointUuids[entry.key] = entry.value;
+      _endpointUuidSources[entry.key] = EndpointUuidSource.derived;
     }
     _log('Using provisioning service: ${service.uuid}');
 
@@ -681,7 +852,46 @@ class EspBleProvisioner {
     _discoveredCharacteristicUuids =
         characteristics.map(_normalizeUuid).toSet();
     _log('Provisioning characteristics: ${characteristics.join(', ')}');
+    await _applyDescriptorEndpointMappings(deviceId, service.uuid);
     _validateDiscoveredEndpoints([provSessionEndpoint, provConfigEndpoint]);
+  }
+
+  Future<void> _applyDescriptorEndpointMappings(
+    String deviceId,
+    String resolvedServiceUuid,
+  ) async {
+    final transport = _transport;
+    if (transport is! BleEndpointMappingTransport) {
+      _log(
+        'Endpoint descriptors cannot be read by this transport; using UUID '
+        'derivation fallback.',
+      );
+      return;
+    }
+    try {
+      final mappings = await (transport as BleEndpointMappingTransport)
+          .readEndpointMappings(deviceId, resolvedServiceUuid);
+      final discovered = _discoveredCharacteristicUuids ?? const <String>{};
+      var applied = 0;
+      for (final entry in mappings.entries) {
+        final endpointName = entry.key.trim();
+        if (endpointName.isEmpty ||
+            entry.value.isEmpty ||
+            _explicitEndpointNames.contains(endpointName) ||
+            !discovered.contains(_normalizeUuid(entry.value))) {
+          continue;
+        }
+        _endpointUuids[endpointName] = entry.value;
+        _endpointUuidSources[endpointName] = EndpointUuidSource.descriptor;
+        applied++;
+      }
+      _log('Resolved $applied endpoint(s) from GATT descriptors.');
+    } catch (error) {
+      _log(
+        'Endpoint descriptor resolution failed; using UUID derivation '
+        'fallback: $error',
+      );
+    }
   }
 
   Future<void> _cleanupFailedConnection(String deviceId) async {
@@ -793,7 +1003,16 @@ class EspBleProvisioner {
     try {
       return parse();
     } catch (error) {
-      throw ProvisionerError('$operation response parse failed: $error.');
+      if (error is ProvisionerError &&
+          error.code != ProvisionerErrorCode.unknown) {
+        rethrow;
+      }
+      throw ProvisionerError(
+        '$operation response parse failed: $error.',
+        code: ProvisionerErrorCode.protocolViolation,
+        operation: operation,
+        cause: error,
+      );
     }
   }
 
@@ -837,10 +1056,10 @@ class EspBleProvisioner {
       await Future<void>.delayed(responseDelay);
     }
 
-    final deadline = DateTime.now().add(responseTimeout);
+    final elapsed = Stopwatch()..start();
     Object? lastError;
     while (true) {
-      final remaining = deadline.difference(DateTime.now());
+      final remaining = responseTimeout - elapsed.elapsed;
       if (remaining <= Duration.zero) break;
 
       try {
@@ -853,12 +1072,19 @@ class EspBleProvisioner {
         }
         lastError = null;
       } catch (error) {
+        if (error is ProvisionerError &&
+            (error.code == ProvisionerErrorCode.connectionLost ||
+                error.code == ProvisionerErrorCode.cancelled ||
+                error.code == ProvisionerErrorCode.disposed ||
+                error.code == ProvisionerErrorCode.sessionInvalidated)) {
+          rethrow;
+        }
         lastError = error;
       }
 
       final delay = _shorterDuration(
         readRetryInterval,
-        deadline.difference(DateTime.now()),
+        responseTimeout - elapsed.elapsed,
       );
       if (delay <= Duration.zero) break;
       await Future<void>.delayed(delay);
@@ -868,6 +1094,11 @@ class EspBleProvisioner {
     throw ProvisionerError(
       'Timed out waiting for response from endpoint "$endpointName" after '
       '${responseTimeout.inMilliseconds}ms.$suffix',
+      code: ProvisionerErrorCode.timeout,
+      operation: 'readEndpointResponse',
+      endpoint: endpointName,
+      cause: lastError,
+      isRetryable: security is Security0,
     );
   }
 
@@ -877,6 +1108,8 @@ class EspBleProvisioner {
       throw ProvisionerError(
         'Endpoint "$endpointName" is not registered. Pass endpointUuids when '
         'creating EspBleProvisioner or call registerEndpoint().',
+        code: ProvisionerErrorCode.endpointNotFound,
+        endpoint: endpointName,
       );
     }
     _ensureDiscoveredEndpoint(endpointName, characteristicUuid);
@@ -891,6 +1124,7 @@ class EspBleProvisioner {
     if (!_connected || deviceId == null) {
       throw const ProvisionerError(
         'Not connected to an ESP provisioning device.',
+        code: ProvisionerErrorCode.connectionLost,
       );
     }
     return deviceId;
@@ -945,6 +1179,8 @@ class EspBleProvisioner {
     if (discoveredCharacteristicUuids.contains(normalized)) return;
     throw ProvisionerError(
       'Endpoint "$endpointName" characteristic not found: $characteristicUuid.',
+      code: ProvisionerErrorCode.endpointNotFound,
+      endpoint: endpointName,
     );
   }
 
@@ -955,6 +1191,7 @@ class EspBleProvisioner {
       if (generation != _connectionGeneration) {
         throw const ProvisionerError(
           'The operation belongs to an expired BLE connection.',
+          code: ProvisionerErrorCode.connectionLost,
         );
       }
       _activeConnectionGeneration = generation;
@@ -963,6 +1200,7 @@ class EspBleProvisioner {
         if (generation != _connectionGeneration) {
           throw const ProvisionerError(
             'The BLE connection changed while the operation was running.',
+            code: ProvisionerErrorCode.connectionLost,
           );
         }
         return result;
@@ -977,6 +1215,7 @@ class EspBleProvisioner {
     if (activeGeneration != null && activeGeneration != _connectionGeneration) {
       throw const ProvisionerError(
         'The BLE connection changed while the operation was running.',
+        code: ProvisionerErrorCode.connectionLost,
       );
     }
   }
@@ -985,29 +1224,146 @@ class EspBleProvisioner {
     if (generation != _connectionGeneration) {
       throw const ProvisionerError(
         'The BLE connection attempt was superseded or cancelled.',
+        code: ProvisionerErrorCode.cancelled,
       );
     }
   }
 
   Future<T> _enqueue<T>(Future<T> Function() action) {
+    _queuedOperationCount++;
     final completer = Completer<T>();
     _operationTail = _operationTail.catchError((_) {}).then((_) async {
       try {
         completer.complete(await action());
       } catch (error, stackTrace) {
-        completer.completeError(error, stackTrace);
+        completer.completeError(_normalizeError(error, stackTrace), stackTrace);
+      } finally {
+        _queuedOperationCount--;
       }
     });
     return completer.future;
   }
 
+  Future<T> _runImmediate<T>(Future<T> Function() action) {
+    _queuedOperationCount++;
+    late final Future<T> future;
+    try {
+      // Invoke synchronously so Web Bluetooth requestDevice() remains inside
+      // the originating user-activation task.
+      future = action().onError((error, stackTrace) {
+        throw _normalizeError(
+          error ?? StateError('Unknown asynchronous provisioning failure.'),
+          stackTrace,
+        );
+      });
+    } catch (_) {
+      _queuedOperationCount--;
+      rethrow;
+    }
+    _operationTail = future
+        .then<void>((_) {})
+        .catchError((_) {})
+        .whenComplete(() => _queuedOperationCount--);
+    return future;
+  }
+
   void _ensureNotDisposed() {
     if (_disposed) {
-      throw const ProvisionerError('EspBleProvisioner has been disposed.');
+      throw const ProvisionerError(
+        'EspBleProvisioner has been disposed.',
+        code: ProvisionerErrorCode.disposed,
+      );
     }
   }
 
+  ProvisionerError _normalizeError(Object error, StackTrace stackTrace) {
+    if (error is ProvisionerError) return error;
+    final description = error.toString();
+    if (description.contains('NotFoundError')) {
+      return ProvisionerError(
+        'Bluetooth device selection was cancelled.',
+        code: ProvisionerErrorCode.cancelled,
+        cause: error,
+        causeStackTrace: stackTrace,
+      );
+    }
+    if (description.contains('NotAllowedError') ||
+        description.contains('SecurityError')) {
+      return ProvisionerError(
+        'Bluetooth access was denied or requires a secure user gesture.',
+        code: ProvisionerErrorCode.permissionDenied,
+        cause: error,
+        causeStackTrace: stackTrace,
+      );
+    }
+    if (description.contains('NotSupportedError') ||
+        description.contains('NotImplemented')) {
+      return ProvisionerError(
+        'Bluetooth is not supported by this platform or browser.',
+        code: ProvisionerErrorCode.unsupported,
+        cause: error,
+        causeStackTrace: stackTrace,
+      );
+    }
+    if (error is TimeoutException) {
+      return ProvisionerError(
+        'Provisioning transport timed out: $error',
+        code: ProvisionerErrorCode.timeout,
+        cause: error,
+        causeStackTrace: stackTrace,
+        isRetryable: security is Security0,
+      );
+    }
+    if (error is UnsupportedError) {
+      return ProvisionerError(
+        error.message?.toString() ?? 'Operation is not supported.',
+        code: ProvisionerErrorCode.unsupported,
+        cause: error,
+        causeStackTrace: stackTrace,
+      );
+    }
+    return ProvisionerError(
+      'Provisioning operation failed: $error',
+      cause: error,
+      causeStackTrace: stackTrace,
+    );
+  }
+
   Duration _shorterDuration(Duration a, Duration b) => a <= b ? a : b;
+
+  void _validatePolling(
+    Duration timeout,
+    Duration pollInterval,
+    String operation,
+  ) {
+    if (timeout <= Duration.zero) {
+      throw ArgumentError.value(timeout, 'timeout', '$operation timeout > 0');
+    }
+    if (pollInterval <= Duration.zero) {
+      throw ArgumentError.value(
+        pollInterval,
+        'pollInterval',
+        '$operation pollInterval > 0',
+      );
+    }
+  }
+
+  Future<void> _delay(
+    Duration duration,
+    ProvisioningCancellationToken? token,
+    String operation,
+  ) async {
+    token?.throwIfCancelled(operation);
+    if (token == null) {
+      await Future<void>.delayed(duration);
+      return;
+    }
+    await Future.any<void>([
+      Future<void>.delayed(duration),
+      token.whenCancelled,
+    ]);
+    token.throwIfCancelled(operation);
+  }
 
   bool _sameUuid(String a, String b) => _normalizeUuid(a) == _normalizeUuid(b);
 

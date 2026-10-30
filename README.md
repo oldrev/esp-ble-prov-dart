@@ -35,7 +35,7 @@ Since it is written in pure Dart and uses `universal_ble`, this package works se
 
 * **Zero Native Dependencies:** 100% pure Dart implementation of Espressif's provisioning protocol.
 * **ESP BLE Provisioning over GATT:** Full control over the provisioning state machine.
-* **Dynamic Endpoint Mapping:** Automatically derives built-in characteristic UUIDs; supports custom application endpoints.
+* **Dynamic Endpoint Mapping:** Reads ESP endpoint names from GATT descriptors when the transport supports it, with explicit mappings and UUID derivation as fallbacks.
 * **Wi-Fi Utilities:** Scan for nearby networks, configure credentials, and apply Wi-Fi logic.
 * **Protobuf-Powered:** Leverages structured ESP provisioning messages.
 * **Security Support:** Fully implements `Security0` (no security) and `Security1` (Curve25519 key exchange + AES-CTR).
@@ -59,13 +59,24 @@ The built-in BLE endpoint UUIDs follow ESP-IDF's default `wifi_prov_mgr` mapping
 
 ### Custom Endpoints
 
-ESP-IDF assigns application-defined provisioning endpoints sequentially after the built-in ones (`0xFF54`, `0xFF55`, etc.). You can register them by index:
+Endpoint mapping precedence is: explicit registration, GATT descriptor, then
+ESP-IDF UUID derivation. The built-in Web transport reads the `0x2901`
+characteristic user-description values and therefore discovers custom endpoint
+names automatically. `universal_ble 3.x` does not expose descriptor values on
+native platforms, so native clients use UUID derivation unless an explicit
+mapping is registered.
+
+ESP-IDF normally assigns application-defined provisioning endpoints
+sequentially after the built-in ones (`0xFF54`, `0xFF55`, etc.). Register them
+by index when descriptor values are unavailable:
 
 ```dart
 provisioner.registerCustomEndpoint('device-id'); // Index 0 -> 0xFF54
 provisioner.registerCustomEndpoint('factory-info', index: 1); // Index 1 -> 0xFF55
 
 ```
+
+The resolved source is available through `provisioner.endpointUuidSources`.
 
 ## Installation
 
@@ -120,6 +131,26 @@ Future<void> provisionDevice() async {
 
 ```
 
+### Web Bluetooth: authorize, then connect
+
+Web Bluetooth does not provide normal background BLE scanning. It exposes a
+browser device chooser through `requestDevice()`, which must be called directly
+from a user gesture such as a button click. Authorize one device first, then
+connect using the returned handle:
+
+```dart
+Future<void> onProvisionButtonPressed() async {
+  final device = await provisioner.authorizeDevice();
+  await provisioner.connect(device: device);
+  await provisioner.establishSession();
+}
+```
+
+Do not call `authorizeDevice()` from `initState`, a timer, or after unrelated
+asynchronous work. For compatibility, `scanDevices()` opens the same chooser on
+Web and returns at most one device; it is not a scan there. Calling
+`connect()` without a device on Web is rejected deliberately.
+
 ## Protobuf Generation
 
 Protocol messages live in the [`protos`](./protos) directory. If you modify or need to regenerate the Dart protobuf definitions:
@@ -131,6 +162,20 @@ dart pub global activate protoc_plugin
 ```
 
 *(Generated files are output to `lib/src/proto/generated`)*
+
+## Tests
+
+The hardware-independent suite uses deterministic fake transports and covers
+protobuf validation, boundary values, security handshakes, connection
+generations, concurrent workflows, transport failures, Web chooser semantics,
+and resource cleanup:
+
+```bash
+flutter test
+```
+
+Real Web Bluetooth browser integration and ESP hardware interoperability remain
+manual because they require a user gesture and external devices.
 
 ## Debugging
 
@@ -192,6 +237,28 @@ An uncertain BLE write/read failure invalidates a stateful Security1 session.
 Disconnect and establish a new session instead of retrying on the same session.
 Payload bytes are omitted from logs by default; `logPayloads: true` is intended
 only for controlled debugging and may expose provisioning data.
+
+### Cancellation, errors, and public models
+
+Long-running discovery, connection, Wi-Fi scan, and credential workflows accept
+a cooperative cancellation token:
+
+```dart
+final cancellation = ProvisioningCancellationToken();
+final operation = provisioner.scan(cancellationToken: cancellation);
+cancellation.cancel();
+await operation;
+```
+
+`ProvisionerError` exposes a stable `code`, operation/endpoint context, original
+`cause`, stack trace, and retryability hint. Endpoint timing defaults can be
+grouped with `ProvisioningTimeouts`; existing individual constructor arguments
+remain supported and take precedence.
+
+Public Wi-Fi results now use package-owned `WiFiAuthMode`,
+`WiFiStationState`, and `WiFiConnectFailureReason` enums instead of generated
+protobuf types. Unknown future protocol values map to `unknown`. Byte-array
+fields are defensively copied and exposed as unmodifiable views.
 
 ---
 

@@ -13,7 +13,7 @@ dependencies:
   esp_ble_prov_dart:
     path: ..
   cupertino_icons: ^1.0.8
-  universal_ble: 1.2.0
+  universal_ble: ^3.1.2
 
 dev_dependencies:
   flutter_lints: ^6.0.0

@@ -2,6 +2,18 @@ import 'package:universal_ble/universal_ble.dart';
 
 import 'esp_ble_provisioner.dart';
 
+/// How an endpoint-to-characteristic UUID mapping was obtained.
+enum EndpointUuidSource {
+  /// Explicitly supplied by the caller or registered at runtime.
+  explicit,
+
+  /// Read from the ESP GATT characteristic user-description descriptor.
+  descriptor,
+
+  /// Derived from ESP-IDF's conventional short-UUID sequence.
+  derived,
+}
+
 /// Default ESP-IDF BLE provisioning service UUID.
 const String kDefaultEspProvisioningServiceUuid =
     '1775244d-6b43-439b-877c-060f2d9bed07';
