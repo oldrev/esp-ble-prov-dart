@@ -742,7 +742,7 @@ class EspBleProvisioner {
     return _runExclusive(() async {
       try {
         final value = await _readEndpoint(endpointName);
-        return security.decrypt(value);
+        return await security.decrypt(value);
       } catch (error) {
         security.invalidate(error);
         rethrow;

@@ -1,3 +1,7 @@
+## 0.6.1
+
+- Fixed an analyzer warning by awaiting endpoint decryption errors correctly.
+
 ## 0.6.0
 
 - Fixed Web Bluetooth writes for `Uint8List` views with non-zero offsets.
